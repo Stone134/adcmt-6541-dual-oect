@@ -1,0 +1,4 @@
+# GUI dependencies. These are already installed for /usr/bin/python3 on this Mac.
+PyQt5==5.15.11
+pyqtgraph==0.13.7
+numpy==2.0.2

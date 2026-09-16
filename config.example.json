@@ -1,0 +1,17 @@
+{
+  "host": "192.168.1.204",
+  "port": 5025,
+  "socket_timeout_s": 15.0,
+  "period_s": 1.0,
+  "samples_per_gate": 3600,
+  "gate_voltages_v": [-0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8],
+  "vds_a_v": -0.01,
+  "vds_b_v": -0.01,
+  "current_limits_a": [0.3, 0.3, 0.3, 0.3],
+  "integration_code": "IT5",
+  "fixed_measurement_range": true,
+  "batch_samples": 60,
+  "poll_interval_s": 0.25,
+  "output_csv": "oect_two_cell_sync.csv",
+  "standby_when_finished": true
+}
