@@ -21,6 +21,7 @@ from adcmt_6541_sync import ADCMT6541, ADCMTError, LineSocket, format_number
 
 APP_TITLE = "ADCMT 6541 - Dual OECT Synchronized Measurement"
 LEGACY_HEADER = "Time\tGateI\tGateV\tDrainI\tDrainV\n"
+DEFAULT_CURRENT_LIMIT_A = 0.3
 
 
 def labview_scientific(value: float) -> str:
@@ -575,14 +576,35 @@ class ConnectionTestWorker(QtCore.QThread):
             transport.close()
 
 
+class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """Keep input precision without displaying unnecessary trailing zeros."""
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802
+        number = f"{value:.{self.decimals()}f}"
+        if "." in number:
+            number = number.rstrip("0").rstrip(".")
+        return "0" if number == "-0" else number
+
+
+class CompactAxisItem(pg.AxisItem):
+    """Show plot ticks without trailing decimal zeros, including SI-scaled axes."""
+
+    def tickStrings(self, values: Sequence[float], scale: float, spacing: float) -> list[str]:  # noqa: N802
+        labels = [f"{value * scale:.8g}" for value in values]
+        return ["0" if label == "-0" else label for label in labels]
+
+
 class CellControls:
     def __init__(self, name: str, accent: str, default_output: Path) -> None:
+        self.default_output_dir = default_output.parent
         self.group = QtWidgets.QGroupBox(f"OECT {name}")
         self.group.setProperty("accent", accent)
-        form = QtWidgets.QFormLayout(self.group)
-        form.setLabelAlignment(QtCore.Qt.AlignLeft)
-        form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(10)
+        grid = QtWidgets.QGridLayout(self.group)
+        grid.setContentsMargins(16, 20, 16, 12)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
 
         self.vds = self._spin(-3.0, 3.0, -0.01, 0.01, 4, " V")
         self.vg_initial = self._spin(-3.0, 3.0, 0.0, 0.1, 4, " V")
@@ -592,46 +614,56 @@ class CellControls:
         self.keep = self._spin(0.0, 1_000_000.0, 3600.0, 60.0, 3, " s")
         self.delay_ms = self._spin(0.0, 59_998.0, 1000.0, 100.0, 1, " ms")
         self.interval = self._spin(0.1, 60.0, 1.0, 0.1, 3, " s")
-        self.ids_limit = self._spin(3e-6, 0.5, 0.3, 0.003, 6, " A")
-        self.ig_limit = self._spin(3e-6, 0.5, 0.3, 0.003, 6, " A")
 
         rows = (
-            ("Drain-source voltage (Vds)", self.vds),
-            ("Gate voltage - initial", self.vg_initial),
-            ("Gate voltage - final", self.vg_final),
-            ("Gate voltage - step", self.vg_step),
-            ("Hold at each Vg", self.hold),
-            ("Extra keep at final Vg", self.keep),
-            ("Delay before logging", self.delay_ms),
-            ("Output interval", self.interval),
-            ("Drain current limit", self.ids_limit),
-            ("Gate current limit", self.ig_limit),
+            (("Vds", self.vds), ("Vg initial", self.vg_initial)),
+            (("Vg final", self.vg_final), ("Vg step", self.vg_step)),
+            (("Period", self.hold), ("Keep at final", self.keep)),
+            (("Delay", self.delay_ms), ("Read interval", self.interval)),
         )
-        for label, widget in rows:
-            form.addRow(label, widget)
+        for row, pairs in enumerate(rows):
+            for column, (label, widget) in enumerate(pairs):
+                field = QtWidgets.QWidget()
+                field_layout = QtWidgets.QHBoxLayout(field)
+                field_layout.setContentsMargins(0, 0, 0, 0)
+                field_layout.setSpacing(8)
+                caption = QtWidgets.QLabel(label)
+                caption.setMinimumWidth(84)
+                widget.setMinimumWidth(100)
+                field_layout.addWidget(caption)
+                field_layout.addWidget(widget, 1)
+                grid.addWidget(field, row, column)
 
         file_row = QtWidgets.QWidget()
         file_layout = QtWidgets.QHBoxLayout(file_row)
         file_layout.setContentsMargins(0, 0, 0, 0)
-        file_layout.setSpacing(6)
-        self.output = QtWidgets.QLineEdit(str(default_output))
-        self.output.setToolTip("Historical five-column tab-delimited .txt output")
+        file_layout.setSpacing(8)
+        file_layout.addWidget(QtWidgets.QLabel("Raw-data file"))
+        self.output = QtWidgets.QLineEdit(default_output.name)
+        self.output.setToolTip(
+            f"Historical five-column tab-delimited .txt output; relative paths use {self.default_output_dir}"
+        )
         browse = QtWidgets.QPushButton("Browse")
         browse.setProperty("secondary", True)
         browse.clicked.connect(self._browse)
         file_layout.addWidget(self.output, 1)
         file_layout.addWidget(browse)
-        form.addRow("Raw-data file", file_row)
+        grid.addWidget(file_row, 4, 0, 1, 2)
 
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
+        self.progress.setFixedWidth(116)
         self.detail = QtWidgets.QLabel("Ready")
         self.detail.setProperty("muted", True)
-        self.detail.setWordWrap(True)
-        form.addRow(self.progress)
-        form.addRow(self.detail)
+        progress_row = QtWidgets.QWidget()
+        progress_layout = QtWidgets.QHBoxLayout(progress_row)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(12)
+        progress_layout.addWidget(self.progress)
+        progress_layout.addWidget(self.detail, 1)
+        grid.addWidget(progress_row, 5, 0, 1, 2)
 
     @staticmethod
     def _spin(
@@ -642,7 +674,7 @@ class CellControls:
         decimals: int,
         suffix: str,
     ) -> QtWidgets.QDoubleSpinBox:
-        box = QtWidgets.QDoubleSpinBox()
+        box = CompactDoubleSpinBox()
         box.setRange(minimum, maximum)
         box.setValue(value)
         box.setSingleStep(step)
@@ -652,10 +684,13 @@ class CellControls:
         return box
 
     def _browse(self) -> None:
+        initial_path = Path(self.output.text()).expanduser()
+        if not initial_path.is_absolute():
+            initial_path = self.default_output_dir / initial_path
         selected, _ = QtWidgets.QFileDialog.getSaveFileName(
             self.group,
             "Choose raw-data output",
-            self.output.text(),
+            str(initial_path),
             "Text data (*.txt);;All files (*)",
         )
         if selected:
@@ -673,8 +708,6 @@ class CellControls:
             self.keep,
             self.delay_ms,
             self.interval,
-            self.ids_limit,
-            self.ig_limit,
             self.output,
         ):
             widget.setEnabled(enabled)
@@ -684,7 +717,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1580, 980)
+        self.resize(1580, 960)
         self.setMinimumSize(1180, 760)
         self.worker: AcquisitionWorker | None = None
         self.connection_worker: ConnectionTestWorker | None = None
@@ -700,14 +733,8 @@ class MainWindow(QtWidgets.QMainWindow):
         outer.setSpacing(12)
         outer.addWidget(self._header())
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._control_panel())
-        splitter.addWidget(self._plot_panel())
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([445, 1100])
-        outer.addWidget(splitter, 1)
+        outer.addWidget(self._control_panel())
+        outer.addWidget(self._plot_panel(), 1)
         outer.addWidget(self._footer())
         self._apply_style()
         self._simulation_changed(True)
@@ -733,42 +760,50 @@ class MainWindow(QtWidgets.QMainWindow):
         return card
 
     def _control_panel(self) -> QtWidgets.QWidget:
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        content = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 10, 0)
-        layout.setSpacing(12)
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
         connection = QtWidgets.QGroupBox("Connection")
-        grid = QtWidgets.QGridLayout(connection)
-        self.simulation = QtWidgets.QCheckBox("Simulation mode - no instrument commands")
+        row = QtWidgets.QHBoxLayout(connection)
+        row.setContentsMargins(16, 16, 16, 10)
+        row.setSpacing(10)
+        self.simulation = QtWidgets.QCheckBox("Simulation - no instrument commands")
         self.simulation.setChecked(True)
         self.simulation.toggled.connect(self._simulation_changed)
         self.host = QtWidgets.QLineEdit("192.168.1.204")
+        self.host.setFixedWidth(140)
         self.port = QtWidgets.QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(5025)
+        self.port.setFixedWidth(82)
         self.test_button = QtWidgets.QPushButton("Test connection")
         self.test_button.setProperty("secondary", True)
         self.test_button.clicked.connect(self._test_connection)
-        grid.addWidget(self.simulation, 0, 0, 1, 2)
-        grid.addWidget(QtWidgets.QLabel("Instrument IP"), 1, 0)
-        grid.addWidget(self.host, 1, 1)
-        grid.addWidget(QtWidgets.QLabel("TCP port"), 2, 0)
-        grid.addWidget(self.port, 2, 1)
-        grid.addWidget(self.test_button, 3, 0, 1, 2)
+        compliance = QtWidgets.QLabel("CH 1–4 limit: 0.3 A each")
+        compliance.setProperty("muted", True)
+        compliance.setToolTip("Fixed current compliance on all four channels; confirm device safety before live runs")
+        row.addWidget(self.simulation)
+        row.addSpacing(10)
+        row.addWidget(QtWidgets.QLabel("Instrument IP"))
+        row.addWidget(self.host)
+        row.addWidget(QtWidgets.QLabel("Port"))
+        row.addWidget(self.port)
+        row.addWidget(self.test_button)
+        row.addStretch(1)
+        row.addWidget(compliance)
         layout.addWidget(connection)
 
         output_root = Path(__file__).resolve().parent
         self.controls_a = CellControls("A", "cyan", output_root / "measurement=lvl1.txt")
         self.controls_b = CellControls("B", "violet", output_root / "measurement=lvl2.txt")
-        layout.addWidget(self.controls_a.group)
-        layout.addWidget(self.controls_b.group)
-        layout.addStretch(1)
-        scroll.setWidget(content)
-        return scroll
+        cells = QtWidgets.QHBoxLayout()
+        cells.setSpacing(10)
+        cells.addWidget(self.controls_a.group, 1)
+        cells.addWidget(self.controls_b.group, 1)
+        layout.addLayout(cells)
+        return panel
 
     def _plot_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
@@ -778,21 +813,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plots: dict[str, pg.PlotWidget] = {}
         self.curves: dict[str, pg.PlotDataItem] = {}
         plot_specs = (
-            ("id_a", "OECT A • Drain current", "Id", "A", "#27D3C2"),
-            ("id_b", "OECT B • Drain current", "Id", "A", "#A98BFF"),
-            ("vg_a", "OECT A • Gate voltage", "Vg", "V", "#55E6D7"),
-            ("vg_b", "OECT B • Gate voltage", "Vg", "V", "#C2AEFF"),
+            ("id_a", "OECT A • Drain current", "Id", "A", "#078A84"),
+            ("id_b", "OECT B • Drain current", "Id", "A", "#7455B7"),
+            ("vg_a", "OECT A • Gate voltage", "Vg", "V", "#1CA89B"),
+            ("vg_b", "OECT B • Gate voltage", "Vg", "V", "#9874C8"),
         )
-        for index, (key, title, ylabel, units, color) in enumerate(plot_specs):
-            plot = pg.PlotWidget(background="#101827")
-            plot.setTitle(title, color="#EAF2FF", size="11pt")
-            plot.setLabel("bottom", "Elapsed time", units="s", color="#AFC0D8")
-            plot.setLabel("left", ylabel, units=units, color="#AFC0D8")
-            plot.showGrid(x=True, y=True, alpha=0.18)
-            plot.getAxis("left").setTextPen("#AFC0D8")
-            plot.getAxis("bottom").setTextPen("#AFC0D8")
-            plot.setDownsampling(auto=True, mode="peak")
-            plot.setClipToView(True)
+        for index, (key, title, xlabel, units, color) in enumerate(plot_specs):
+            plot = pg.PlotWidget(
+                background="#FFFFFF",
+                axisItems={
+                    "left": CompactAxisItem(orientation="left"),
+                    "bottom": CompactAxisItem(orientation="bottom"),
+                },
+            )
+            plot.setTitle(title, color="#273449", size="11pt")
+            plot.setLabel("bottom", xlabel, units=units, color="#526378")
+            plot.setLabel("left", "Elapsed time", units="s", color="#526378")
+            plot.showGrid(x=True, y=True, alpha=0.14)
+            plot.getAxis("left").setTextPen("#526378")
+            plot.getAxis("bottom").setTextPen("#526378")
+            plot.getAxis("left").setPen("#CAD5E3")
+            plot.getAxis("bottom").setPen("#CAD5E3")
+            # pyqtgraph downsamples by x; with current/voltage on x it can
+            # drop nearly every point when those values vary by nanoamps.
             curve = plot.plot(pen=pg.mkPen(color, width=2), connect="finite")
             self.plots[key] = plot
             self.curves[key] = curve
@@ -828,33 +871,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
-            QMainWindow, QWidget { background: #0B1220; color: #EAF2FF; font-family: 'Helvetica Neue'; font-size: 13px; }
-            QFrame#headerCard, QFrame#footerCard, QGroupBox { background: #111C2E; border: 1px solid #24344E; border-radius: 10px; }
-            QFrame#headerCard { border-left: 4px solid #27D3C2; }
-            QLabel#title { font-size: 23px; font-weight: 700; color: #F5F9FF; }
-            QLabel[muted="true"] { color: #91A3BC; }
-            QLabel#modeBadge { color: #061813; background: #55E6D7; border-radius: 10px; padding: 5px 12px; font-size: 11px; font-weight: 800; }
-            QLabel#statusDot { color: #55E6D7; font-size: 16px; }
-            QGroupBox { margin-top: 12px; padding: 16px 10px 10px 10px; font-weight: 700; }
-            QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #DCE8F8; }
-            QGroupBox[accent="cyan"] { border-top: 2px solid #27D3C2; }
-            QGroupBox[accent="violet"] { border-top: 2px solid #A98BFF; }
-            QLineEdit, QSpinBox, QDoubleSpinBox { background: #0C1626; border: 1px solid #30425F; border-radius: 6px; padding: 6px 8px; color: #F2F7FF; min-height: 22px; selection-background-color: #287F79; }
-            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #55E6D7; }
-            QPushButton { border: 0; border-radius: 7px; padding: 8px 14px; font-weight: 700; background: #263954; color: #EAF2FF; }
-            QPushButton:hover { background: #345072; }
-            QPushButton:disabled { background: #1B2638; color: #5F7088; }
-            QPushButton#startButton { background: #26BCAA; color: #041714; min-width: 145px; }
-            QPushButton#startButton:hover { background: #55E6D7; }
-            QPushButton#stopButton { background: #A84055; color: white; min-width: 105px; }
-            QPushButton#stopButton:hover { background: #CF5A70; }
-            QPushButton[secondary="true"] { background: #1B2A40; border: 1px solid #30425F; }
-            QProgressBar { background: #0B1423; border: 1px solid #2B3C57; border-radius: 6px; text-align: center; color: #DCE8F8; min-height: 16px; }
-            QProgressBar::chunk { background: #27D3C2; border-radius: 5px; }
-            QScrollArea { background: transparent; }
-            QScrollBar:vertical { background: #0B1220; width: 10px; margin: 0; }
-            QScrollBar::handle:vertical { background: #30425F; border-radius: 5px; min-height: 30px; }
-            QSplitter::handle { background: #0B1220; width: 8px; }
+            QMainWindow { background: #F3F7FB; }
+            QWidget { color: #273449; font-family: 'Helvetica Neue'; font-size: 13px; }
+            QFrame#headerCard, QFrame#footerCard, QGroupBox { background: #FFFFFF; border: 1px solid #D9E2EC; border-radius: 10px; }
+            QFrame#headerCard { border-left: 4px solid #0D9D93; }
+            QLabel#title { font-size: 23px; font-weight: 700; color: #1C3045; }
+            QLabel[muted="true"] { color: #63758B; }
+            QLabel#modeBadge { color: #075E57; background: #DDF6F0; border-radius: 10px; padding: 5px 12px; font-size: 11px; font-weight: 800; }
+            QLabel#statusDot { color: #0D9D93; font-size: 16px; }
+            QGroupBox { margin-top: 12px; padding: 7px 0 0 0; font-weight: 700; }
+            QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #30435B; }
+            QGroupBox[accent="cyan"] { border-top: 2px solid #0D9D93; }
+            QGroupBox[accent="violet"] { border-top: 2px solid #8260BE; }
+            QLineEdit, QSpinBox, QDoubleSpinBox { background: #FAFCFF; border: 1px solid #C9D6E3; border-radius: 6px; padding: 5px 8px; color: #24364A; min-height: 22px; selection-background-color: #AFDAD6; }
+            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #0D9D93; }
+            QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background: #EDF2F6; color: #8796A6; }
+            QPushButton { border: 1px solid #C8D5E1; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: #EDF3F8; color: #30435B; }
+            QPushButton:hover { background: #DDE9F2; }
+            QPushButton:disabled { background: #EFF3F6; color: #9CACBB; }
+            QPushButton#startButton { background: #0D9D93; border-color: #0D9D93; color: white; min-width: 145px; }
+            QPushButton#startButton:hover { background: #0B827A; }
+            QPushButton#stopButton { background: #C7586A; border-color: #C7586A; color: white; min-width: 105px; }
+            QPushButton#stopButton:hover { background: #AC4557; }
+            QPushButton[secondary="true"] { background: #F7FAFD; border: 1px solid #C9D6E3; }
+            QProgressBar { background: #EEF3F7; border: 1px solid #D2DEE9; border-radius: 6px; text-align: center; color: #30435B; min-height: 16px; }
+            QProgressBar::chunk { background: #49BAAF; border-radius: 5px; }
             QCheckBox { spacing: 8px; }
             """
         )
@@ -865,16 +906,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.test_button.setEnabled(not checked)
         self.mode_badge.setText("SIMULATION" if checked else "LIVE INSTRUMENT")
         self.mode_badge.setStyleSheet(
-            "background: #55E6D7; color: #061813;" if checked else "background: #FFBF69; color: #241300;"
+            "background: #DDF6F0; color: #075E57;" if checked else "background: #FFF0D9; color: #785318;"
         )
         self.status_label.setText(
             "Ready - simulation mode is enabled"
             if checked
-            else "Ready - review current limits and wiring before starting"
+            else "Ready - review wiring and fixed 0.3 A current limits before starting"
         )
 
     def _cell_plan(self, name: str, controls: CellControls) -> CellPlan:
         drain_channel, gate_channel = ((1, 2) if name == "A" else (3, 4))
+        output_text = controls.output.text().strip()
+        if not output_text:
+            raise ValueError(f"OECT {name}: raw-data filename is required")
+        output_path = Path(output_text).expanduser()
+        if not output_path.is_absolute():
+            output_path = controls.default_output_dir / output_path
         return CellPlan(
             name=name,
             drain_channel=drain_channel,
@@ -887,9 +934,9 @@ class MainWindow(QtWidgets.QMainWindow):
             keep_s=controls.keep.value(),
             delay_s=controls.delay_ms.value() / 1000.0,
             interval_s=controls.interval.value(),
-            ids_limit_a=controls.ids_limit.value(),
-            ig_limit_a=controls.ig_limit.value(),
-            output_path=Path(controls.output.text()).expanduser().resolve(),
+            ids_limit_a=DEFAULT_CURRENT_LIMIT_A,
+            ig_limit_a=DEFAULT_CURRENT_LIMIT_A,
+            output_path=output_path.resolve(),
         )
 
     def _build_plan(self) -> ExperimentPlan:
@@ -936,17 +983,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if answer != QtWidgets.QMessageBox.Yes:
                 return
 
-        if not plan.simulation and max(
-            plan.cell_a.ids_limit_a,
-            plan.cell_a.ig_limit_a,
-            plan.cell_b.ids_limit_a,
-            plan.cell_b.ig_limit_a,
-        ) >= 0.3:
+        if not plan.simulation:
             answer = QtWidgets.QMessageBox.warning(
                 self,
                 "Confirm 0.3 A current limits",
-                "One or more current limits are 0.3 A or higher. These are the LabVIEW defaults, "
-                "but they may be unsafe for an OECT. Start the live measurement anyway?",
+                "All four current limits are fixed at 0.3 A, matching the LabVIEW defaults. "
+                "That may be unsafe for an OECT. Start the live measurement anyway?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No,
             )
@@ -995,11 +1037,11 @@ class MainWindow(QtWidgets.QMainWindow):
         data["id"].append(drain_i)
         data["vg"].append(gate_v)
         if cell == "A":
-            self.curves["id_a"].setData(data["t"], data["id"])
-            self.curves["vg_a"].setData(data["t"], data["vg"], stepMode="right")
+            self.curves["id_a"].setData(data["id"], data["t"])
+            self.curves["vg_a"].setData(data["vg"], data["t"])
         else:
-            self.curves["id_b"].setData(data["t"], data["id"])
-            self.curves["vg_b"].setData(data["t"], data["vg"], stepMode="right")
+            self.curves["id_b"].setData(data["id"], data["t"])
+            self.curves["vg_b"].setData(data["vg"], data["t"])
         self.summary_label.setText(
             f"A: {len(self.plot_data['A']['t'])} samples   "
             f"B: {len(self.plot_data['B']['t'])} samples"
@@ -1019,7 +1061,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _completed(self, success: bool, message: str) -> None:
         self._set_running(False)
         self.status_label.setText(message)
-        self.status_dot.setStyleSheet("color: #55E6D7;" if success else "color: #FF7B8F;")
+        self.status_dot.setStyleSheet("color: #0D9D93;" if success else "color: #C7586A;")
         if not success and "Stopped safely" not in message:
             QtWidgets.QMessageBox.critical(self, "Measurement ended", message)
 

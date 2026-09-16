@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PyQt5 import QtWidgets
 
 from oect_dual_gui import (
     CellPlan,
@@ -13,6 +18,7 @@ from oect_dual_gui import (
     ExperimentPlan,
     LEGACY_HEADER,
     LegacyTextWriter,
+    MainWindow,
     common_hardware_interval,
     labview_scientific,
     voltage_levels,
@@ -110,6 +116,63 @@ class GuiSyntheticTests(unittest.TestCase):
             self.assertIn("SOV-0.02", events)
             self.assertIn("SOV-0.1", events)
             self.assertIn("SOV-0.3", events)
+
+
+class GuiLayoutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def setUp(self) -> None:
+        self.window = MainWindow()
+        self.window.resize(1280, 800)
+        self.window.show()
+        self.app.processEvents()
+
+    def tearDown(self) -> None:
+        self.window.close()
+
+    def test_compact_controls_and_fixed_current_limits(self) -> None:
+        self.assertEqual(self.window.controls_a.vg_final.text(), "-0.8 V")
+        self.assertEqual(self.window.controls_a.keep.text(), "3600 s")
+        self.assertEqual(self.window.controls_b.delay_ms.text(), "1000 ms")
+        plan = self.window._build_plan()
+        self.assertEqual(plan.cell_a.output_path, Path(__file__).resolve().parent / "measurement=lvl1.txt")
+        self.assertEqual(plan.cell_b.output_path, Path(__file__).resolve().parent / "measurement=lvl2.txt")
+        for cell in (plan.cell_a, plan.cell_b):
+            self.assertEqual(cell.ids_limit_a, 0.3)
+            self.assertEqual(cell.ig_limit_a, 0.3)
+        self.assertFalse(hasattr(self.window.controls_a, "ids_limit"))
+
+    def test_both_cells_share_a_page_without_scrolling(self) -> None:
+        self.assertEqual(self.window.findChildren(QtWidgets.QScrollArea), [])
+        a = self.window.controls_a.group
+        b = self.window.controls_b.group
+        self.assertTrue(a.isVisible())
+        self.assertTrue(b.isVisible())
+        self.assertEqual(a.y(), b.y())
+        self.assertGreater(self.window.plots["id_a"].height(), 100)
+
+    def test_time_is_vertical_and_measurements_are_horizontal(self) -> None:
+        for key, quantity in (("id_a", "Id"), ("id_b", "Id"), ("vg_a", "Vg"), ("vg_b", "Vg")):
+            plot = self.window.plots[key]
+            self.assertEqual(plot.getAxis("bottom").labelText, quantity)
+            self.assertEqual(plot.getAxis("left").labelText, "Elapsed time")
+        self.assertEqual(
+            self.window.plots["id_a"].getAxis("bottom").tickStrings([2.5e-9, 3e-9], 1e9, 0.5),
+            ["2.5", "3"],
+        )
+        self.window._sample("A", 1.25, 1e-10, -0.1, 2e-9, -0.01)
+        self.assertEqual(list(self.window.curves["id_a"].xData), [2e-9])
+        self.assertEqual(list(self.window.curves["id_a"].yData), [1.25])
+        self.assertEqual(list(self.window.curves["vg_a"].xData), [-0.1])
+        self.assertEqual(list(self.window.curves["vg_a"].yData), [1.25])
+
+    def test_nanoampere_current_curve_keeps_all_points(self) -> None:
+        for index in range(100):
+            self.window._sample("A", float(index), 0.0, -0.1, 2e-9 + index * 1e-11, -0.01)
+        self.app.processEvents()
+        self.assertEqual(len(self.window.curves["id_a"].getData()[0]), 100)
 
 
 if __name__ == "__main__":
