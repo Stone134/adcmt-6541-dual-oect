@@ -150,23 +150,46 @@ class GuiLayoutTests(unittest.TestCase):
         b = self.window.controls_b.group
         self.assertTrue(a.isVisible())
         self.assertTrue(b.isVisible())
-        self.assertEqual(a.y(), b.y())
-        self.assertGreater(self.window.plots["id_a"].height(), 100)
+        self.assertEqual(a.x(), b.x())
+        self.assertLess(a.y(), b.y())
+        plot = self.window.plots["id_a"]
+        self.assertGreater(plot.height(), 200)
+        self.assertLess(plot.width() / plot.height(), 1.8)
 
-    def test_time_is_vertical_and_measurements_are_horizontal(self) -> None:
+    def test_control_columns_follow_requested_order(self) -> None:
+        for controls in (self.window.controls_a, self.window.controls_b):
+            group = controls.group
+            left = (controls.vds, controls.vg_initial, controls.vg_final, controls.vg_step)
+            right = (controls.hold, controls.delay_ms, controls.keep, controls.interval)
+            left_positions = [widget.mapTo(group, widget.rect().topLeft()) for widget in left]
+            right_positions = [widget.mapTo(group, widget.rect().topLeft()) for widget in right]
+            self.assertEqual(len({point.x() for point in left_positions}), 1)
+            self.assertEqual(len({point.x() for point in right_positions}), 1)
+            self.assertLess(left_positions[0].x(), right_positions[0].x())
+            self.assertEqual(
+                [point.y() for point in left_positions],
+                [point.y() for point in right_positions],
+            )
+            self.assertTrue(all(
+                first.y() < second.y()
+                for first, second in zip(left_positions, left_positions[1:])
+            ))
+
+    def test_time_is_horizontal_and_negative_values_are_above(self) -> None:
         for key, quantity in (("id_a", "Id"), ("id_b", "Id"), ("vg_a", "Vg"), ("vg_b", "Vg")):
             plot = self.window.plots[key]
-            self.assertEqual(plot.getAxis("bottom").labelText, quantity)
-            self.assertEqual(plot.getAxis("left").labelText, "Elapsed time")
+            self.assertEqual(plot.getAxis("bottom").labelText, "Elapsed time")
+            self.assertEqual(plot.getAxis("left").labelText, quantity)
+            self.assertTrue(plot.getViewBox().state["yInverted"])
         self.assertEqual(
-            self.window.plots["id_a"].getAxis("bottom").tickStrings([2.5e-9, 3e-9], 1e9, 0.5),
+            self.window.plots["id_a"].getAxis("left").tickStrings([2.5e-9, 3e-9], 1e9, 0.5),
             ["2.5", "3"],
         )
-        self.window._sample("A", 1.25, 1e-10, -0.1, 2e-9, -0.01)
-        self.assertEqual(list(self.window.curves["id_a"].xData), [2e-9])
-        self.assertEqual(list(self.window.curves["id_a"].yData), [1.25])
-        self.assertEqual(list(self.window.curves["vg_a"].xData), [-0.1])
-        self.assertEqual(list(self.window.curves["vg_a"].yData), [1.25])
+        self.window._sample("A", 1.25, 1e-10, -0.1, -2e-9, -0.01)
+        self.assertEqual(list(self.window.curves["id_a"].xData), [1.25])
+        self.assertEqual(list(self.window.curves["id_a"].yData), [-2e-9])
+        self.assertEqual(list(self.window.curves["vg_a"].xData), [1.25])
+        self.assertEqual(list(self.window.curves["vg_a"].yData), [-0.1])
 
     def test_nanoampere_current_curve_keeps_all_points(self) -> None:
         for index in range(100):

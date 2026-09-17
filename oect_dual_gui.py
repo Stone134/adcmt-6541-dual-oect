@@ -600,9 +600,9 @@ class CellControls:
         self.group = QtWidgets.QGroupBox(f"OECT {name}")
         self.group.setProperty("accent", accent)
         grid = QtWidgets.QGridLayout(self.group)
-        grid.setContentsMargins(16, 20, 16, 12)
-        grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(8)
+        grid.setContentsMargins(14, 18, 14, 8)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(6)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
 
@@ -616,10 +616,10 @@ class CellControls:
         self.interval = self._spin(0.1, 60.0, 1.0, 0.1, 3, " s")
 
         rows = (
-            (("Vds", self.vds), ("Vg initial", self.vg_initial)),
-            (("Vg final", self.vg_final), ("Vg step", self.vg_step)),
-            (("Period", self.hold), ("Keep at final", self.keep)),
-            (("Delay", self.delay_ms), ("Read interval", self.interval)),
+            (("Vds", self.vds), ("Period", self.hold)),
+            (("Vg initial", self.vg_initial), ("Delay", self.delay_ms)),
+            (("Vg final", self.vg_final), ("Keep at final", self.keep)),
+            (("Vg step", self.vg_step), ("Read interval", self.interval)),
         )
         for row, pairs in enumerate(rows):
             for column, (label, widget) in enumerate(pairs):
@@ -628,8 +628,8 @@ class CellControls:
                 field_layout.setContentsMargins(0, 0, 0, 0)
                 field_layout.setSpacing(8)
                 caption = QtWidgets.QLabel(label)
-                caption.setMinimumWidth(84)
-                widget.setMinimumWidth(100)
+                caption.setMinimumWidth(80)
+                widget.setMinimumWidth(90)
                 field_layout.addWidget(caption)
                 field_layout.addWidget(widget, 1)
                 grid.addWidget(field, row, column)
@@ -733,8 +733,16 @@ class MainWindow(QtWidgets.QMainWindow):
         outer.setSpacing(12)
         outer.addWidget(self._header())
 
-        outer.addWidget(self._control_panel())
-        outer.addWidget(self._plot_panel(), 1)
+        body = QtWidgets.QWidget()
+        body_layout = QtWidgets.QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        controls = self._control_panel()
+        controls.setMinimumWidth(550)
+        controls.setMaximumWidth(600)
+        body_layout.addWidget(controls)
+        body_layout.addWidget(self._plot_panel(), 1)
+        outer.addWidget(body, 1)
         outer.addWidget(self._footer())
         self._apply_style()
         self._simulation_changed(True)
@@ -766,9 +774,10 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setSpacing(10)
 
         connection = QtWidgets.QGroupBox("Connection")
-        row = QtWidgets.QHBoxLayout(connection)
-        row.setContentsMargins(16, 16, 16, 10)
-        row.setSpacing(10)
+        grid = QtWidgets.QGridLayout(connection)
+        grid.setContentsMargins(14, 18, 14, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
         self.simulation = QtWidgets.QCheckBox("Simulation - no instrument commands")
         self.simulation.setChecked(True)
         self.simulation.toggled.connect(self._simulation_changed)
@@ -784,25 +793,21 @@ class MainWindow(QtWidgets.QMainWindow):
         compliance = QtWidgets.QLabel("CH 1–4 limit: 0.3 A each")
         compliance.setProperty("muted", True)
         compliance.setToolTip("Fixed current compliance on all four channels; confirm device safety before live runs")
-        row.addWidget(self.simulation)
-        row.addSpacing(10)
-        row.addWidget(QtWidgets.QLabel("Instrument IP"))
-        row.addWidget(self.host)
-        row.addWidget(QtWidgets.QLabel("Port"))
-        row.addWidget(self.port)
-        row.addWidget(self.test_button)
-        row.addStretch(1)
-        row.addWidget(compliance)
+        grid.addWidget(self.simulation, 0, 0, 1, 3)
+        grid.addWidget(compliance, 0, 3, 1, 3, QtCore.Qt.AlignRight)
+        grid.addWidget(QtWidgets.QLabel("Instrument IP"), 1, 0)
+        grid.addWidget(self.host, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("Port"), 1, 2)
+        grid.addWidget(self.port, 1, 3)
+        grid.addWidget(self.test_button, 1, 4, 1, 2)
         layout.addWidget(connection)
 
         output_root = Path(__file__).resolve().parent
         self.controls_a = CellControls("A", "cyan", output_root / "measurement=lvl1.txt")
         self.controls_b = CellControls("B", "violet", output_root / "measurement=lvl2.txt")
-        cells = QtWidgets.QHBoxLayout()
-        cells.setSpacing(10)
-        cells.addWidget(self.controls_a.group, 1)
-        cells.addWidget(self.controls_b.group, 1)
-        layout.addLayout(cells)
+        layout.addWidget(self.controls_a.group)
+        layout.addWidget(self.controls_b.group)
+        layout.addStretch(1)
         return panel
 
     def _plot_panel(self) -> QtWidgets.QWidget:
@@ -818,24 +823,25 @@ class MainWindow(QtWidgets.QMainWindow):
             ("vg_a", "OECT A • Gate voltage", "Vg", "V", "#1CA89B"),
             ("vg_b", "OECT B • Gate voltage", "Vg", "V", "#9874C8"),
         )
-        for index, (key, title, xlabel, units, color) in enumerate(plot_specs):
+        for index, (key, title, ylabel, units, color) in enumerate(plot_specs):
             plot = pg.PlotWidget(
-                background="#FFFFFF",
+                background="#FFFCF6",
                 axisItems={
                     "left": CompactAxisItem(orientation="left"),
                     "bottom": CompactAxisItem(orientation="bottom"),
                 },
             )
             plot.setTitle(title, color="#273449", size="11pt")
-            plot.setLabel("bottom", xlabel, units=units, color="#526378")
-            plot.setLabel("left", "Elapsed time", units="s", color="#526378")
+            plot.setLabel("bottom", "Elapsed time", units="s", color="#526378")
+            plot.setLabel("left", ylabel, units=units, color="#526378")
+            plot.getViewBox().invertY(True)
             plot.showGrid(x=True, y=True, alpha=0.14)
             plot.getAxis("left").setTextPen("#526378")
             plot.getAxis("bottom").setTextPen("#526378")
             plot.getAxis("left").setPen("#CAD5E3")
             plot.getAxis("bottom").setPen("#CAD5E3")
-            # pyqtgraph downsamples by x; with current/voltage on x it can
-            # drop nearly every point when those values vary by nanoamps.
+            plot.setDownsampling(auto=True, mode="peak")
+            plot.setClipToView(True)
             curve = plot.plot(pen=pg.mkPen(color, width=2), connect="finite")
             self.plots[key] = plot
             self.curves[key] = curve
@@ -871,9 +877,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
-            QMainWindow { background: #F3F7FB; }
+            QMainWindow { background: #F6F2EA; }
             QWidget { color: #273449; font-family: 'Helvetica Neue'; font-size: 13px; }
-            QFrame#headerCard, QFrame#footerCard, QGroupBox { background: #FFFFFF; border: 1px solid #D9E2EC; border-radius: 10px; }
+            QFrame#headerCard, QFrame#footerCard, QGroupBox { background: #FFFCF6; border: 1px solid #E2DACE; border-radius: 10px; }
             QFrame#headerCard { border-left: 4px solid #0D9D93; }
             QLabel#title { font-size: 23px; font-weight: 700; color: #1C3045; }
             QLabel[muted="true"] { color: #63758B; }
@@ -883,18 +889,18 @@ class MainWindow(QtWidgets.QMainWindow):
             QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #30435B; }
             QGroupBox[accent="cyan"] { border-top: 2px solid #0D9D93; }
             QGroupBox[accent="violet"] { border-top: 2px solid #8260BE; }
-            QLineEdit, QSpinBox, QDoubleSpinBox { background: #FAFCFF; border: 1px solid #C9D6E3; border-radius: 6px; padding: 5px 8px; color: #24364A; min-height: 22px; selection-background-color: #AFDAD6; }
+            QLineEdit, QSpinBox, QDoubleSpinBox { background: #FFFDF9; border: 1px solid #D9D1C5; border-radius: 6px; padding: 3px 7px; color: #24364A; min-height: 20px; selection-background-color: #AFDAD6; }
             QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #0D9D93; }
-            QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background: #EDF2F6; color: #8796A6; }
-            QPushButton { border: 1px solid #C8D5E1; border-radius: 7px; padding: 7px 12px; font-weight: 700; background: #EDF3F8; color: #30435B; }
-            QPushButton:hover { background: #DDE9F2; }
-            QPushButton:disabled { background: #EFF3F6; color: #9CACBB; }
+            QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background: #F2EEE7; color: #8796A6; }
+            QPushButton { border: 1px solid #D9D1C5; border-radius: 7px; padding: 6px 11px; font-weight: 700; background: #F3EFE7; color: #30435B; }
+            QPushButton:hover { background: #EAE3D8; }
+            QPushButton:disabled { background: #F1EEE8; color: #9CACBB; }
             QPushButton#startButton { background: #0D9D93; border-color: #0D9D93; color: white; min-width: 145px; }
             QPushButton#startButton:hover { background: #0B827A; }
             QPushButton#stopButton { background: #C7586A; border-color: #C7586A; color: white; min-width: 105px; }
             QPushButton#stopButton:hover { background: #AC4557; }
-            QPushButton[secondary="true"] { background: #F7FAFD; border: 1px solid #C9D6E3; }
-            QProgressBar { background: #EEF3F7; border: 1px solid #D2DEE9; border-radius: 6px; text-align: center; color: #30435B; min-height: 16px; }
+            QPushButton[secondary="true"] { background: #FAF7F1; border: 1px solid #D9D1C5; }
+            QProgressBar { background: #F1ECE3; border: 1px solid #DDD5CA; border-radius: 6px; text-align: center; color: #30435B; min-height: 16px; }
             QProgressBar::chunk { background: #49BAAF; border-radius: 5px; }
             QCheckBox { spacing: 8px; }
             """
@@ -1037,11 +1043,11 @@ class MainWindow(QtWidgets.QMainWindow):
         data["id"].append(drain_i)
         data["vg"].append(gate_v)
         if cell == "A":
-            self.curves["id_a"].setData(data["id"], data["t"])
-            self.curves["vg_a"].setData(data["vg"], data["t"])
+            self.curves["id_a"].setData(data["t"], data["id"])
+            self.curves["vg_a"].setData(data["t"], data["vg"], stepMode="right")
         else:
-            self.curves["id_b"].setData(data["id"], data["t"])
-            self.curves["vg_b"].setData(data["vg"], data["t"])
+            self.curves["id_b"].setData(data["t"], data["id"])
+            self.curves["vg_b"].setData(data["t"], data["vg"], stepMode="right")
         self.summary_label.setText(
             f"A: {len(self.plot_data['A']['t'])} samples   "
             f"B: {len(self.plot_data['B']['t'])} samples"

@@ -25,9 +25,9 @@ Double-click `launch_gui.command`, or run:
 /usr/bin/python3 oect_dual_gui.py
 ```
 
-![Light-theme GUI with synthetic sample traces](GUI_demo_preview.png)
+![Warm light-theme GUI with synthetic sample traces](GUI_demo_preview.png)
 
-The light-theme GUI starts in simulation mode so it cannot energize the instrument accidentally. OECT A and B have independent Vds, Vg initial/final/step, per-level hold, extra final keep, pre-measurement delay, output interval, and output filenames. Both compact control cards are visible side by side without scrolling. The four live plots show Id and Vg horizontally against elapsed time vertically for both cells. Numeric controls omit unnecessary trailing zeros; raw-data numeric formatting is unchanged.
+The warm, cream-colored GUI starts in simulation mode so it cannot energize the instrument accidentally. OECT A and B have independent Vds, Vg initial/final/step, per-level hold, extra final keep, pre-measurement delay, output interval, and output filenames. Both control cards stay visible in a left column without scrolling. Each card orders its left controls as Vds, Vg initial, Vg final, Vg step; its right controls as period, delay, keep at final, read interval. The four larger, nearly square live plots put elapsed time horizontally and Id or Vg vertically, with the vertical axis inverted so more-negative values appear higher. Numeric controls omit unnecessary trailing zeros; raw-data numeric formatting is unchanged.
 
 The current-limit controls are hidden. The GUI fixes drain and gate current limits on CH1–CH4 at **0.3 A each** and confirms that setting before a live run.
 
