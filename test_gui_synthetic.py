@@ -9,9 +9,10 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtGui, QtWidgets
 
 from oect_dual_gui import (
+    AcquisitionWorker,
     CellPlan,
     CellRuntime,
     DualOECTInstrument,
@@ -69,6 +70,9 @@ class GuiSyntheticTests(unittest.TestCase):
                 state.start_stage(0.0)
                 accepted = [t for t in (0.1, 0.2, 0.3, 0.4, 0.5) if state.should_record(t)]
                 self.assertEqual(accepted, [0.1, 0.3, 0.5])
+                self.assertEqual(state.progress_percent(0.999), 99)
+                state.advance(1.0)
+                self.assertEqual(state.progress_percent(1.0), 100)
             finally:
                 writer.close()
 
@@ -117,6 +121,127 @@ class GuiSyntheticTests(unittest.TestCase):
             self.assertIn("SOV-0.1", events)
             self.assertIn("SOV-0.3", events)
 
+    def test_completed_cell_sets_both_sources_to_zero_without_stopping_master(self) -> None:
+        class FakeInstrument:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+                self.channel = 1
+
+            def select(self, channel: int) -> None:
+                self.channel = channel
+                self.events.append(f"SCH{channel}")
+
+            def write(self, command: str) -> None:
+                self.events.append(command)
+
+            def query(self, command: str) -> str:
+                self.events.append(command)
+                return "SOV+0.0000E+0"
+
+        driver = DualOECTInstrument("127.0.0.1", 5025)
+        fake = FakeInstrument()
+        driver.instrument = fake  # type: ignore[assignment]
+        driver.zero_cell(1, 2)
+        self.assertEqual(
+            fake.events,
+            ["SCH1", "SOV0", "SOV?", "SCH2", "SOV0", "SOV?"],
+        )
+        self.assertNotIn("SBY", fake.events)
+        self.assertNotIn("M1", fake.events)
+
+    def test_shorter_cell_stops_logging_and_reaches_100_percent(self) -> None:
+        class FakeInstrument:
+            def __init__(self) -> None:
+                self.zeroed: list[tuple[int, int]] = []
+
+            def zero_cell(self, drain_channel: int, gate_channel: int) -> None:
+                self.zeroed.append((drain_channel, gate_channel))
+
+        with tempfile.TemporaryDirectory() as directory:
+            def cell(name: str, duration: float) -> CellPlan:
+                return CellPlan(
+                    name=name,
+                    drain_channel=1 if name == "A" else 3,
+                    gate_channel=2 if name == "A" else 4,
+                    vds_v=-0.01,
+                    vg_initial_v=-0.1,
+                    vg_final_v=-0.1,
+                    vg_step_v=-0.1,
+                    hold_s=duration,
+                    keep_s=0.0,
+                    delay_s=0.0,
+                    interval_s=0.1,
+                    ids_limit_a=0.3,
+                    ig_limit_a=0.3,
+                    output_path=Path(directory) / f"{name}.txt",
+                )
+
+            for shorter_name in ("A", "B"):
+                with self.subTest(shorter_name=shorter_name):
+                    plan = ExperimentPlan(
+                        host="127.0.0.1", port=5025, simulation=True,
+                        cell_a=cell("A", 1.0 if shorter_name == "A" else 3.0),
+                        cell_b=cell("B", 1.0 if shorter_name == "B" else 3.0),
+                    )
+                    writers = (
+                        LegacyTextWriter(plan.cell_a.output_path),
+                        LegacyTextWriter(plan.cell_b.output_path),
+                    )
+                    try:
+                        states = (
+                            CellRuntime(plan.cell_a, writers[0]),
+                            CellRuntime(plan.cell_b, writers[1]),
+                        )
+                        for state in states:
+                            state.start_stage(0.0)
+                        worker = AcquisitionWorker(plan)
+                        progress: list[tuple[str, int, str]] = []
+                        samples: list[str] = []
+                        worker.progress_ready.connect(
+                            lambda name, percent, detail: progress.append((name, percent, detail))
+                        )
+                        worker.sample_ready.connect(
+                            lambda name, *_values: samples.append(name)
+                        )
+                        fake = FakeInstrument()
+                        worker._advance_due_stages(states, 1.01, fake)  # type: ignore[arg-type]
+                        self.assertEqual(
+                            fake.zeroed,
+                            [(1, 2)] if shorter_name == "A" else [(3, 4)],
+                        )
+                        self.assertTrue(next(state for state in states if state.plan.name == shorter_name).done)
+                        self.assertFalse(next(state for state in states if state.plan.name != shorter_name).done)
+                        self.assertIn(
+                            (shorter_name, 100, "complete | outputs 0 V | 0 samples"),
+                            progress,
+                        )
+                        worker._process_sample(states, 1.1, (1e-6, 2e-9, 3e-6, 4e-9))
+                        self.assertEqual(samples, ["B" if shorter_name == "A" else "A"])
+                        self.assertEqual(
+                            [event for event in progress if event[0] == shorter_name],
+                            [(shorter_name, 100, "complete | outputs 0 V | 0 samples")],
+                        )
+                        self.assertEqual(
+                            plan.cell_a.output_path.read_text().count("\n"),
+                            1 if shorter_name == "A" else 2,
+                        )
+                        self.assertEqual(
+                            plan.cell_b.output_path.read_text().count("\n"),
+                            1 if shorter_name == "B" else 2,
+                        )
+                        simulated = worker._synthetic_values(states, 1.1)
+                        self.assertEqual(
+                            simulated[:2] if shorter_name == "A" else simulated[2:],
+                            (0.0, 0.0),
+                        )
+                        worker._advance_due_stages(states, 3.01, fake)  # type: ignore[arg-type]
+                        self.assertTrue(all(state.done for state in states))
+                        self.assertEqual(fake.zeroed, [(1, 2), (3, 4)] if shorter_name == "A" else [(3, 4), (1, 2)])
+                        self.assertEqual([p for _, p, _ in progress if p == 100], [100, 100])
+                    finally:
+                        for writer in writers:
+                            writer.close()
+
 
 class GuiLayoutTests(unittest.TestCase):
     @classmethod
@@ -137,12 +262,23 @@ class GuiLayoutTests(unittest.TestCase):
         self.assertEqual(self.window.controls_a.keep.text(), "3600 s")
         self.assertEqual(self.window.controls_b.delay_ms.text(), "1000 ms")
         plan = self.window._build_plan()
-        self.assertEqual(plan.cell_a.output_path, Path(__file__).resolve().parent / "measurement=lvl1.txt")
-        self.assertEqual(plan.cell_b.output_path, Path(__file__).resolve().parent / "measurement=lvl2.txt")
+        self.assertEqual(plan.cell_a.output_path, Path(__file__).resolve().parent.parent / "measurement=lvl1.txt")
+        self.assertEqual(plan.cell_b.output_path, Path(__file__).resolve().parent.parent / "measurement=lvl2.txt")
         for cell in (plan.cell_a, plan.cell_b):
             self.assertEqual(cell.ids_limit_a, 0.3)
             self.assertEqual(cell.ig_limit_a, 0.3)
         self.assertFalse(hasattr(self.window.controls_a, "ids_limit"))
+
+    def test_spinbox_arrows_are_dark_and_renderable(self) -> None:
+        style = self.window.styleSheet()
+        assets = Path(__file__).resolve().parent / "assets"
+        for name in ("spin_up.svg", "spin_down.svg"):
+            path = assets / name
+            self.assertIn(str(path), style)
+            pixmap = QtGui.QPixmap(str(path))
+            self.assertFalse(pixmap.isNull())
+            color = pixmap.toImage().pixelColor(5, 3)
+            self.assertLess(max(color.red(), color.green(), color.blue()), 40)
 
     def test_both_cells_share_a_page_without_scrolling(self) -> None:
         self.assertEqual(self.window.findChildren(QtWidgets.QScrollArea), [])

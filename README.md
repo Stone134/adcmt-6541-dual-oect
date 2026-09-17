@@ -27,13 +27,15 @@ Double-click `launch_gui.command`, or run:
 
 ![Warm light-theme GUI with synthetic sample traces](GUI_demo_preview.png)
 
-The warm, cream-colored GUI starts in simulation mode so it cannot energize the instrument accidentally. OECT A and B have independent Vds, Vg initial/final/step, per-level hold, extra final keep, pre-measurement delay, output interval, and output filenames. Both control cards stay visible in a left column without scrolling. Each card orders its left controls as Vds, Vg initial, Vg final, Vg step; its right controls as period, delay, keep at final, read interval. The four larger, nearly square live plots put elapsed time horizontally and Id or Vg vertically, with the vertical axis inverted so more-negative values appear higher. Numeric controls omit unnecessary trailing zeros; raw-data numeric formatting is unchanged.
+The warm, cream-colored GUI starts in simulation mode so it cannot energize the instrument accidentally. OECT A and B have independent Vds, Vg initial/final/step, per-level hold, extra final keep, pre-measurement delay, output interval, and output filenames. Both control cards stay visible in a left column without scrolling. Each card orders its left controls as Vds, Vg initial, Vg final, Vg step; its right controls as period, delay, keep at final, read interval. The four larger, nearly square live plots put elapsed time horizontally and Id or Vg vertically, with the vertical axis inverted so more-negative values appear higher. Numeric controls omit unnecessary trailing zeros, and the spin-box arrows are dark for visibility; raw-data numeric formatting is unchanged.
 
 The current-limit controls are hidden. The GUI fixes drain and gate current limits on CH1–CH4 at **0.3 A each** and confirms that setting before a live run.
 
 The delay is *inside* each hold period: the gate changes at the start of the period, logging begins after the delay, and the next gate step starts when the hold period ends. The final keep time extends the last period.
 
 The instrument keeps acquiring synchronized samples during a delay, but those samples are deliberately omitted from that cell's file and live plot. This allows A and B to use different delays without breaking their common hardware sampling clock.
+
+When one OECT finishes before the other, its drain and gate source settings are each changed to 0 V and verified. Its file and live plots stop receiving samples, and its progress reaches 100%. The other OECT continues on its own schedule. If A finishes first, CH1 remains in operate mode at 0 V solely to keep the shared hardware trigger running for B; the final cleanup puts the instrument in standby. These source changes are sent from the computer at the scheduled boundary, so their physical timing has normal command/network latency rather than a guaranteed zero-latency transition.
 
 When A and B use different output intervals, the 6541 runs all four channels from a common millisecond-resolution hardware clock (the greatest common divisor of the two intervals). Each text file is decimated to its requested interval; samples that appear in both files still come from the same hardware trigger.
 The common interval must be at least 0.100 s; the GUI reports incompatible interval choices before starting.
@@ -44,7 +46,7 @@ Each OECT gets its own historical-format file:
 Time<TAB>GateI<TAB>GateV<TAB>DrainI<TAB>DrainV
 ```
 
-Numbers use seven digits after the decimal and LabVIEW-style exponents such as `1.0380000E+0`. Existing raw files are never read or appended; a new run asks before replacing an existing output.
+Numbers use seven digits after the decimal and LabVIEW-style exponents such as `1.0380000E+0`. The GUI defaults to `../measurement=lvl1.txt` and `../measurement=lvl2.txt` in the `ADCMT IV` mother folder. Existing raw files are never read or appended; a new run asks before replacing an existing output.
 `GateI` and `DrainI` are measured currents. `GateV` and `DrainV` are the verified/configured source-voltage values, not additional simultaneous voltage ADC readings.
 
 This was checked against historical files under `../26.09.04/` and `../26.08.04/`. Their five columns and numeric layout are reproduced; the timestamp values in new files come from the synchronized sample clock instead of the former sequential host reads.

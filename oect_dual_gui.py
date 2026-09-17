@@ -183,10 +183,12 @@ class CellRuntime:
         return True
 
     def progress_percent(self, elapsed_s: float) -> int:
+        if self.done:
+            return 100
         total = max(self.stage_ends_elapsed_s - self.stage_started_elapsed_s, 1e-9)
         part = max(0.0, min(1.0, (elapsed_s - self.stage_started_elapsed_s) / total))
         completed = self.level_index + part
-        return int(round(100.0 * completed / len(self.plan.levels)))
+        return min(99, int(round(100.0 * completed / len(self.plan.levels))))
 
 
 class DualOECTInstrument:
@@ -273,9 +275,9 @@ class DualOECTInstrument:
         inst.write("OPR")
         inst.write("M0")
 
-    def set_gate(self, gate_channel: int, voltage_v: float) -> None:
+    def set_channel_voltage(self, channel: int, voltage_v: float) -> None:
         inst = self._inst()
-        inst.select(gate_channel)
+        inst.select(channel)
         inst.write(f"SOV{format_number(voltage_v)}")
         returned = inst.query("SOV?")
         numeric = returned.replace("SOV", "").strip()
@@ -285,8 +287,17 @@ class DualOECTInstrument:
             raise ADCMTError(f"cannot parse SOV? response {returned!r}") from exc
         if not math.isclose(actual, voltage_v, abs_tol=1e-6):
             raise ADCMTError(
-                f"CH{gate_channel} gate verification failed: requested {voltage_v}, got {actual}"
+                f"CH{channel} voltage verification failed: requested {voltage_v}, got {actual}"
             )
+
+    def set_gate(self, gate_channel: int, voltage_v: float) -> None:
+        self.set_channel_voltage(gate_channel, voltage_v)
+
+    def zero_cell(self, drain_channel: int, gate_channel: int) -> None:
+        # CH1 remains operating at 0 V if A finishes first: its SYNC OUT must
+        # keep clocking CH3/CH4 until B has completed its own schedule.
+        self.set_channel_voltage(drain_channel, 0.0)
+        self.set_channel_voltage(gate_channel, 0.0)
 
     def memory_count(self, channel: int) -> int:
         return self._inst().memory_count(channel)
@@ -488,6 +499,19 @@ class AcquisitionWorker(QtCore.QThread):
         for state in states:
             if state.done or elapsed_s < state.stage_ends_elapsed_s:
                 continue
+            if state.is_final_level:
+                if instrument is not None:
+                    instrument.zero_cell(state.plan.drain_channel, state.plan.gate_channel)
+                state.advance(elapsed_s)
+                self.status_ready.emit(
+                    f"{state.plan.name}: schedule complete; Vds and Vg set to 0 V"
+                )
+                self.progress_ready.emit(
+                    state.plan.name,
+                    100,
+                    f"complete | outputs 0 V | {state.samples_written} samples",
+                )
+                continue
             changed = state.advance(elapsed_s)
             if changed:
                 if instrument is not None:
@@ -495,11 +519,6 @@ class AcquisitionWorker(QtCore.QThread):
                 self.status_ready.emit(
                     f"{state.plan.name}: Vg -> {state.gate_v:g} V; "
                     f"waiting {state.plan.delay_s:g} s before logging"
-                )
-            else:
-                self.status_ready.emit(f"{state.plan.name}: schedule complete")
-                self.progress_ready.emit(
-                    state.plan.name, 100, f"complete | {state.samples_written} samples"
                 )
 
     def _process_sample(
@@ -511,6 +530,8 @@ class AcquisitionWorker(QtCore.QThread):
         id_a, ig_a, id_b, ig_b = values
         paired = ((states[0], id_a, ig_a), (states[1], id_b, ig_b))
         for state, drain_i, gate_i in paired:
+            if state.done:
+                continue
             if state.should_record(elapsed_s):
                 state.writer.write(
                     elapsed_s,
@@ -528,16 +549,14 @@ class AcquisitionWorker(QtCore.QThread):
                     drain_i,
                     state.plan.vds_v,
                 )
-            phase = "complete" if state.done else (
-                "delay" if elapsed_s < state.measure_started_elapsed_s else "measuring"
-            )
+            phase = "delay" if elapsed_s < state.measure_started_elapsed_s else "measuring"
             detail = (
                 f"{phase} | level {state.level_index + 1}/{len(state.plan.levels)} | "
                 f"Vg {state.gate_v:g} V | {state.samples_written} samples"
             )
             self.progress_ready.emit(
                 state.plan.name,
-                state.progress_percent(elapsed_s) if not state.done else 100,
+                state.progress_percent(elapsed_s),
                 detail,
             )
 
@@ -547,6 +566,9 @@ class AcquisitionWorker(QtCore.QThread):
     ) -> tuple[float, float, float, float]:
         results: list[float] = []
         for index, state in enumerate(states):
+            if state.done:
+                results.extend((0.0, 0.0))
+                continue
             age = max(0.0, elapsed_s - state.stage_started_elapsed_s)
             response = 1.0 - math.exp(-age / (8.0 + index * 3.0))
             drain = state.plan.vds_v * (1e-6 + abs(state.gate_v) * 5e-4) * response
@@ -802,7 +824,7 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.test_button, 1, 4, 1, 2)
         layout.addWidget(connection)
 
-        output_root = Path(__file__).resolve().parent
+        output_root = Path(__file__).resolve().parent.parent
         self.controls_a = CellControls("A", "cyan", output_root / "measurement=lvl1.txt")
         self.controls_b = CellControls("B", "violet", output_root / "measurement=lvl2.txt")
         layout.addWidget(self.controls_a.group)
@@ -875,6 +897,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return card
 
     def _apply_style(self) -> None:
+        arrow_up = (Path(__file__).resolve().parent / "assets" / "spin_up.svg").as_posix()
+        arrow_down = (Path(__file__).resolve().parent / "assets" / "spin_down.svg").as_posix()
         self.setStyleSheet(
             """
             QMainWindow { background: #F6F2EA; }
@@ -892,6 +916,11 @@ class MainWindow(QtWidgets.QMainWindow):
             QLineEdit, QSpinBox, QDoubleSpinBox { background: #FFFDF9; border: 1px solid #D9D1C5; border-radius: 6px; padding: 3px 7px; color: #24364A; min-height: 20px; selection-background-color: #AFDAD6; }
             QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #0D9D93; }
             QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background: #F2EEE7; color: #8796A6; }
+            QSpinBox, QDoubleSpinBox { padding-right: 22px; }
+            QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 19px; background: #F3EFE7; border-left: 1px solid #D9D1C5; border-top-right-radius: 5px; }
+            QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 19px; background: #F3EFE7; border-left: 1px solid #D9D1C5; border-bottom-right-radius: 5px; }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url("__ARROW_UP__"); width: 10px; height: 6px; }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url("__ARROW_DOWN__"); width: 10px; height: 6px; }
             QPushButton { border: 1px solid #D9D1C5; border-radius: 7px; padding: 6px 11px; font-weight: 700; background: #F3EFE7; color: #30435B; }
             QPushButton:hover { background: #EAE3D8; }
             QPushButton:disabled { background: #F1EEE8; color: #9CACBB; }
@@ -903,7 +932,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QProgressBar { background: #F1ECE3; border: 1px solid #DDD5CA; border-radius: 6px; text-align: center; color: #30435B; min-height: 16px; }
             QProgressBar::chunk { background: #49BAAF; border-radius: 5px; }
             QCheckBox { spacing: 8px; }
-            """
+            """.replace("__ARROW_UP__", arrow_up).replace("__ARROW_DOWN__", arrow_down)
         )
 
     def _simulation_changed(self, checked: bool) -> None:
