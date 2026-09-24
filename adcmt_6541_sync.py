@@ -75,7 +75,7 @@ class RunConfig:
             vds_b_v=float(raw["vds_b_v"]),
             current_limits_a=limits,  # type: ignore[arg-type]
             integration_code=str(raw.get("integration_code", "IT5")).upper(),
-            fixed_measurement_range=bool(raw.get("fixed_measurement_range", True)),
+            fixed_measurement_range=bool(raw.get("fixed_measurement_range", False)),
             batch_samples=int(raw.get("batch_samples", 60)),
             poll_interval_s=float(raw.get("poll_interval_s", 0.25)),
             output_csv=str(raw.get("output_csv", "oect_sync_measurement.csv")),
@@ -220,6 +220,8 @@ class ADCMT6541:
             self.write("FX0")       # explicit measurement function
             self.write("F2")        # DC current measurement
             self.write("R1" if cfg.fixed_measurement_range else "R0")
+            if not cfg.fixed_measurement_range:
+                self.write("RD0")   # no extra delay after an automatic range change
             self.write(cfg.integration_code)
             self.write("AZ0")       # auto-zero off for deterministic timing
             self.write("RE5")       # 5.5 digit output
@@ -535,6 +537,7 @@ def command_plan(cfg: RunConfig) -> list[str]:
                 "FX0",
                 "F2",
                 "R1" if cfg.fixed_measurement_range else "R0",
+                *([] if cfg.fixed_measurement_range else ["RD0"]),
                 cfg.integration_code,
                 "AZ0",
                 "RE5",

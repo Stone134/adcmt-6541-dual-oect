@@ -9,7 +9,7 @@
   "vds_b_v": -0.01,
   "current_limits_a": [0.3, 0.3, 0.3, 0.3],
   "integration_code": "IT5",
-  "fixed_measurement_range": true,
+  "fixed_measurement_range": false,
   "batch_samples": 60,
   "poll_interval_s": 0.25,
   "output_csv": "oect_two_cell_sync.csv",

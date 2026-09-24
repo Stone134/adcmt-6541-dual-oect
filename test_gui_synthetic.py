@@ -133,6 +133,10 @@ class GuiSyntheticTests(unittest.TestCase):
             def write(self, command: str) -> None:
                 self.events.append(command)
 
+            def query(self, command: str) -> str:
+                self.events.append(command)
+                return "R0"
+
         with tempfile.TemporaryDirectory() as directory:
             def cell(
                 name: str,
@@ -166,6 +170,10 @@ class GuiSyntheticTests(unittest.TestCase):
             self.assertEqual(events.count("CP6"), 1)
             self.assertEqual(events.count("TG1"), 3)
             self.assertEqual(events.count("SP0,0.050,999"), 3)
+            self.assertEqual(events.count("R0"), 4)
+            self.assertEqual(events.count("RD0"), 4)
+            self.assertEqual(events.count("R?"), 4)
+            self.assertNotIn("R1", events)
             self.assertIn("SOV-0.01", events)
             self.assertIn("SOV-0.02", events)
             self.assertIn("SOV-0.1", events)
@@ -337,6 +345,7 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertEqual(cell.ids_limit_a, 0.3)
             self.assertEqual(cell.ig_limit_a, 0.3)
         self.assertFalse(hasattr(self.window.controls_a, "ids_limit"))
+        self.assertNotIn("Confirm 0.3 A", self.window.status_label.text())
 
     def test_each_oect_has_an_independent_on_off_switch(self) -> None:
         self.window.controls_a.active.setChecked(False)

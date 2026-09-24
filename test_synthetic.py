@@ -24,7 +24,7 @@ def synthetic_config() -> RunConfig:
             "vds_b_v": -0.02,
             "current_limits_a": [0.03, 0.003, 0.03, 0.003],
             "integration_code": "IT5",
-            "fixed_measurement_range": True,
+            "fixed_measurement_range": False,
             "batch_samples": 2,
             "poll_interval_s": 0.01,
             "output_csv": "synthetic.csv",
@@ -48,6 +48,9 @@ class SyntheticTests(unittest.TestCase):
         self.assertEqual(plan.count("CP7"), 3)
         self.assertEqual(plan.count("TG1"), 3)
         self.assertEqual(plan.count("OP1"), 3)
+        self.assertEqual(plan.count("R0"), 4)
+        self.assertEqual(plan.count("RD0"), 4)
+        self.assertNotIn("R1", plan)
         self.assertIn("SP0,0.055,1000", plan)
         self.assertEqual(plan.count("SP0,0.050,999"), 3)
 

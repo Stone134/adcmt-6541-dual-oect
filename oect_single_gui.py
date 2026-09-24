@@ -99,7 +99,8 @@ class SingleOECTInstrument:
                 f"SOV{format_number(voltage_v)}",
                 "FX0",
                 "F2",
-                "R1",
+                "R0",
+                "RD0",
                 "IT5",
                 "AZ0",
                 "RE5",
@@ -110,6 +111,11 @@ class SingleOECTInstrument:
                 "ST1",
             ):
                 inst.write(command)
+            range_mode = inst.query("R?").replace(" ", "").upper()
+            if range_mode not in {"R0", "0", "+0"}:
+                raise ADCMTError(
+                    f"CH{channel} current auto-range verification failed: {range_mode!r}"
+                )
             if channel == 1:
                 commands = (
                     f"SP0,0.055,{format_number(base_ms)}",
@@ -399,7 +405,7 @@ class SingleOECTWindow(MainWindow):
         self.test_button = QtWidgets.QPushButton("Test connection")
         self.test_button.setProperty("secondary", True)
         self.test_button.clicked.connect(self._test_connection)
-        compliance = QtWidgets.QLabel("CH1–2 limit: 0.3 A each")
+        compliance = QtWidgets.QLabel("Auto current range • 0.3 A maximum compliance")
         compliance.setProperty("muted", True)
         grid.addWidget(self.simulation, 0, 0, 1, 3)
         grid.addWidget(compliance, 0, 3, 1, 3, QtCore.Qt.AlignRight)
@@ -486,18 +492,6 @@ class SingleOECTWindow(MainWindow):
             )
             if answer != QtWidgets.QMessageBox.Yes:
                 return
-        if not plan.simulation:
-            answer = QtWidgets.QMessageBox.warning(
-                self,
-                "Confirm 0.3 A current limits",
-                "CH1 and CH2 current limits are fixed at 0.3 A. "
-                "That may be unsafe for an OECT. Start the live measurement anyway?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,
-            )
-            if answer != QtWidgets.QMessageBox.Yes:
-                return
-
         for values in self.plot_data["A"].values():
             values.clear()
         for curve in self.curves.values():

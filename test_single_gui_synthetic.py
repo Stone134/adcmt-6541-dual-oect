@@ -56,6 +56,10 @@ class SingleInstrumentTests(unittest.TestCase):
             def write(self, command: str) -> None:
                 self.events.append((self.channel, command))
 
+            def query(self, command: str) -> str:
+                self.events.append((self.channel, command))
+                return "R0"
+
         with tempfile.TemporaryDirectory() as directory:
             plan = SingleExperimentPlan(
                 host="127.0.0.1",
@@ -75,6 +79,12 @@ class SingleInstrumentTests(unittest.TestCase):
                 )
             self.assertIn((1, "CP6"), fake.events)
             self.assertIn((2, "TG1"), fake.events)
+            self.assertIn((1, "R0"), fake.events)
+            self.assertIn((2, "R0"), fake.events)
+            self.assertIn((1, "RD0"), fake.events)
+            self.assertIn((2, "RD0"), fake.events)
+            self.assertNotIn((1, "R1"), fake.events)
+            self.assertNotIn((2, "R1"), fake.events)
             self.assertNotIn((3, "ST1"), fake.events)
             self.assertNotIn((4, "ST1"), fake.events)
 

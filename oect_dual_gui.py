@@ -257,7 +257,8 @@ class DualOECTInstrument:
                 f"SOV{format_number(voltage_v)}",
                 "FX0",
                 "F2",
-                "R1",
+                "R0",
+                "RD0",
                 "IT5",
                 "AZ0",
                 "RE5",
@@ -268,6 +269,11 @@ class DualOECTInstrument:
                 "ST1",
             ):
                 inst.write(command)
+            range_mode = inst.query("R?").replace(" ", "").upper()
+            if range_mode not in {"R0", "0", "+0"}:
+                raise ADCMTError(
+                    f"CH{channel} current auto-range verification failed: {range_mode!r}"
+                )
             if channel == 1:
                 for command in (
                     f"SP0,0.055,{format_number(base_ms)}",
@@ -863,9 +869,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.test_button = QtWidgets.QPushButton("Test connection")
         self.test_button.setProperty("secondary", True)
         self.test_button.clicked.connect(self._test_connection)
-        compliance = QtWidgets.QLabel("CH 1–4 limit: 0.3 A each")
+        compliance = QtWidgets.QLabel("Auto current range • 0.3 A maximum compliance")
         compliance.setProperty("muted", True)
-        compliance.setToolTip("Fixed current compliance on all four channels; confirm device safety before live runs")
+        compliance.setToolTip("Current measurement auto-ranges; maximum source compliance remains 0.3 A")
         grid.addWidget(self.simulation, 0, 0, 1, 3)
         grid.addWidget(compliance, 0, 3, 1, 3, QtCore.Qt.AlignRight)
         grid.addWidget(QtWidgets.QLabel("Instrument IP"), 1, 0)
@@ -1001,7 +1007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText(
             "Ready - simulation mode is enabled"
             if checked
-            else "Ready - review wiring and fixed 0.3 A current limits before starting"
+            else "Ready - review wiring and polarity before starting"
         )
 
     def _cell_plan(self, name: str, controls: CellControls) -> CellPlan:
@@ -1075,18 +1081,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Replace existing output?",
                 "The following output file(s) already exist and will be replaced:\n\n"
                 + "\n".join(str(path) for path in existing),
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No,
-            )
-            if answer != QtWidgets.QMessageBox.Yes:
-                return
-
-        if not plan.simulation:
-            answer = QtWidgets.QMessageBox.warning(
-                self,
-                "Confirm 0.3 A current limits",
-                "All four current limits are fixed at 0.3 A, matching the LabVIEW defaults. "
-                "That may be unsafe for an OECT. Start the live measurement anyway?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No,
             )

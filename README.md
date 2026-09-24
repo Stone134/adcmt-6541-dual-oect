@@ -29,7 +29,7 @@ Double-click `launch_gui.command`, or run:
 
 The warm, cream-colored GUI starts in simulation mode so it cannot energize the instrument accidentally. OECT A and B have independent Vds, Vg initial/final/step, per-level hold, extra final keep, pre-measurement delay, output interval, and output filenames. Both control cards stay visible in a left column without scrolling. Each card orders its left controls as Vds, Vg initial, Vg final, Vg step; its right controls as period, delay, keep at final, read interval. The four larger, nearly square live plots put elapsed time horizontally and Id or Vg vertically, with the vertical axis inverted so more-negative values appear higher. Numeric controls omit unnecessary trailing zeros, and the spin-box arrows are dark for visibility; raw-data numeric formatting is unchanged.
 
-The current-limit controls are hidden. The GUI fixes drain and gate current limits on CH1–CH4 at **0.3 A each** and confirms that setting before a live run.
+The current-limit controls are hidden. The GUI keeps **0.3 A maximum compliance** on CH1–CH4 and uses the 6541's automatic current-measurement range (`R0`) with no added range-change delay (`RD0`). There is no extra confirmation dialog before a live run.
 
 The delay is *inside* each hold period: the gate changes at the start of the period, logging begins after the delay, and the next gate step starts when the hold period ends. The final keep time extends the last period.
 
@@ -53,7 +53,7 @@ This was checked against historical files under `../26.09.04/` and `../26.08.04/
 
 The GUI defaults were obtained from a full export of `../YZ_Stair case 2sim lvl_26.09.15.vi`: Vds -0.01 V, Vg 0 to -0.8 V in -0.1 V steps, 60 s period, 3600 s final keep, 1000 ms delay, 1 s interval, and 0.3 A drain/gate limits. Both OECT panels start with these voltage/timing values, then can be edited independently; current limits remain fixed.
 
-**Measurement-range caution:** the synchronized program uses fixed current measurement ranges (`R1`) tied to each channel's current limit. The inherited 0.3 A limits may both be unsafe and too coarse to resolve nanoampere currents. Verify them on a dummy load before a live run; to use a lower GUI limit, change `DEFAULT_CURRENT_LIMIT_A` in `oect_dual_gui.py`, or use the CLI's configurable limits. The GUI warns before every live run.
+**Current resolution:** `R1` with a 0.3 A compliance forced the 300 mA measurement range, whose resolution is 1 microampere. That caused nanoampere OECT currents to jump between values such as 0 and 1 microampere in both the display and raw file. The GUI now uses `R0`, allowing the instrument to select progressively lower ranges down to 3 microamperes (10 pA resolution). During auto-ranging, the configured compliance range remains the maximum available range.
 
 Python is not inherently more synchronous than LabVIEW; the 6541 hardware timing is what fixes the problem. Python is attractive here because a long-running state machine, batched CSV logging, error handling, and version control are simpler. If the current LabVIEW front panel is important, patching it according to the guide is equally valid.
 

@@ -60,7 +60,8 @@ LMI<CH1 current limit in A>
 SOV<CH1 Vds in V>
 FX0
 F2
-R1
+R0
+RD0
 IT5
 AZ0
 RE5
@@ -87,7 +88,8 @@ LMI<channel current limit in A>
 SOV<channel source voltage in V>
 FX0
 F2
-R1
+R0
+RD0
 IT5
 AZ0
 RE5
@@ -132,8 +134,9 @@ The acquisition continues on the 6541 while LabVIEW reads an older memory range,
 
 ## Range and safety notes
 
-- `R1` makes the current-measurement range follow the current-limit range for voltage sourcing. Choose each `LMI` carefully. The example configuration preserves the original VI's 0.3 A values only as placeholders; lower them to a safe range for the OECTs before energizing the outputs.
-- Fixed source and measurement ranges avoid variable auto-ranging delays and missing data.
+- `R0` enables current-measurement auto-ranging. This is essential for OECT currents: with `R1` and a 0.3 A compliance, the instrument uses the 300 mA measurement range, whose resolution is only 1 microampere.
+- `RD0` selects no extra wait after a measurement-range change. The 1 s sampling period is much longer than the manual's representative 35 ms current-range switching time.
+- In voltage-source/current-measure mode, auto-ranging uses the configured `LMI` range as its maximum and may temporarily lower the effective limit while measuring on a lower range. An over-range result causes the instrument to range upward.
 - `IT5` is 1 PLC. A different integration time is possible, but it must fit comfortably inside the 1 s period.
 - CH1 and CH3 Vds may differ; CH2 and CH4 gate voltages may also differ. Synchronization controls timing, not source-value equality.
 - The 6541 does not output its own measurement timestamp. Treat the common memory address as the authoritative sample index and store a host UTC time for each step start.
