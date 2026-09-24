@@ -73,6 +73,7 @@ class CellPlan:
     ids_limit_a: float
     ig_limit_a: float
     output_path: Path
+    enabled: bool = True
 
     @property
     def levels(self) -> tuple[float, ...]:
@@ -92,8 +93,21 @@ class ExperimentPlan:
     cell_b: CellPlan
 
     @property
+    def active_cells(self) -> tuple[CellPlan, ...]:
+        return tuple(cell for cell in (self.cell_a, self.cell_b) if cell.enabled)
+
+    @property
     def hardware_interval_s(self) -> float:
-        return common_hardware_interval(self.cell_a.interval_s, self.cell_b.interval_s)
+        active = self.active_cells
+        if not active:
+            raise ValueError("Enable at least one OECT before starting")
+        interval_ms = [int(round(cell.interval_s * 1000.0)) for cell in active]
+        if any(value < 100 for value in interval_ms):
+            raise ValueError("Measurement intervals must be at least 0.100 s")
+        common_ms = interval_ms[0]
+        for value in interval_ms[1:]:
+            common_ms = math.gcd(common_ms, value)
+        return common_ms / 1000.0
 
 
 class LegacyTextWriter:
@@ -125,7 +139,7 @@ class LegacyTextWriter:
 @dataclass
 class CellRuntime:
     plan: CellPlan
-    writer: LegacyTextWriter
+    writer: LegacyTextWriter | None
     level_index: int = 0
     stage_started_elapsed_s: float = 0.0
     measure_started_elapsed_s: float = 0.0
@@ -218,10 +232,16 @@ class DualOECTInstrument:
             raise ADCMTError("hardware synchronization requires a base interval >= 0.100 s")
 
         channel_values = {
-            1: (plan.cell_a.vds_v, plan.cell_a.ids_limit_a),
-            2: (plan.cell_a.vg_initial_v, plan.cell_a.ig_limit_a),
-            3: (plan.cell_b.vds_v, plan.cell_b.ids_limit_a),
-            4: (plan.cell_b.vg_initial_v, plan.cell_b.ig_limit_a),
+            1: (plan.cell_a.vds_v if plan.cell_a.enabled else 0.0, plan.cell_a.ids_limit_a),
+            2: (
+                plan.cell_a.vg_initial_v if plan.cell_a.enabled else 0.0,
+                plan.cell_a.ig_limit_a,
+            ),
+            3: (plan.cell_b.vds_v if plan.cell_b.enabled else 0.0, plan.cell_b.ids_limit_a),
+            4: (
+                plan.cell_b.vg_initial_v if plan.cell_b.enabled else 0.0,
+                plan.cell_b.ig_limit_a,
+            ),
         }
         inst.write("DL1")
         inst.write("OH0")
@@ -348,14 +368,18 @@ class AcquisitionWorker(QtCore.QThread):
         success = False
         message = "Measurement ended"
         try:
-            writer_a = LegacyTextWriter(self.plan.cell_a.output_path)
-            writer_b = LegacyTextWriter(self.plan.cell_b.output_path)
-            writers.extend((writer_a, writer_b))
-            state_a = CellRuntime(self.plan.cell_a, writer_a)
-            state_b = CellRuntime(self.plan.cell_b, writer_b)
-            states = (state_a, state_b)
-            for state in states:
-                state.start_stage(0.0)
+            states_list: list[CellRuntime] = []
+            for cell in (self.plan.cell_a, self.plan.cell_b):
+                writer = LegacyTextWriter(cell.output_path) if cell.enabled else None
+                if writer is not None:
+                    writers.append(writer)
+                state = CellRuntime(cell, writer, done=not cell.enabled)
+                if cell.enabled:
+                    state.start_stage(0.0)
+                else:
+                    self.progress_ready.emit(cell.name, 0, "OFF | held at 0 V | no data file")
+                states_list.append(state)
+            states = tuple(states_list)
 
             if self.plan.simulation:
                 self._run_simulation(states)
@@ -533,6 +557,8 @@ class AcquisitionWorker(QtCore.QThread):
             if state.done:
                 continue
             if state.should_record(elapsed_s):
+                if state.writer is None:
+                    raise RuntimeError(f"OECT {state.plan.name}: enabled cell has no data writer")
                 state.writer.write(
                     elapsed_s,
                     gate_i,
@@ -619,6 +645,7 @@ class CompactAxisItem(pg.AxisItem):
 class CellControls:
     def __init__(self, name: str, accent: str, default_output: Path) -> None:
         self.default_output_dir = default_output.parent
+        self.default_output_name = default_output.name
         self.group = QtWidgets.QGroupBox(f"OECT {name}")
         self.group.setProperty("accent", accent)
         grid = QtWidgets.QGridLayout(self.group)
@@ -627,6 +654,19 @@ class CellControls:
         grid.setVerticalSpacing(6)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
+
+        self.switch_row = QtWidgets.QWidget()
+        switch_layout = QtWidgets.QHBoxLayout(self.switch_row)
+        switch_layout.setContentsMargins(0, 0, 0, 0)
+        switch_layout.addWidget(QtWidgets.QLabel("Measurement channel"))
+        switch_layout.addStretch(1)
+        self.active = QtWidgets.QCheckBox("ON")
+        self.active.setObjectName("cellToggle")
+        self.active.setChecked(True)
+        self.active.setToolTip("Turn this OECT measurement on or off for the next run")
+        self.active.toggled.connect(self._active_changed)
+        switch_layout.addWidget(self.active)
+        grid.addWidget(self.switch_row, 0, 0, 1, 2)
 
         self.vds = self._spin(-3.0, 3.0, -0.01, 0.01, 4, " V")
         self.vg_initial = self._spin(-3.0, 3.0, 0.0, 0.1, 4, " V")
@@ -654,7 +694,7 @@ class CellControls:
                 widget.setMinimumWidth(90)
                 field_layout.addWidget(caption)
                 field_layout.addWidget(widget, 1)
-                grid.addWidget(field, row, column)
+                grid.addWidget(field, row + 1, column)
 
         file_row = QtWidgets.QWidget()
         file_layout = QtWidgets.QHBoxLayout(file_row)
@@ -665,12 +705,12 @@ class CellControls:
         self.output.setToolTip(
             f"Historical five-column tab-delimited .txt output; relative paths use {self.default_output_dir}"
         )
-        browse = QtWidgets.QPushButton("Browse")
-        browse.setProperty("secondary", True)
-        browse.clicked.connect(self._browse)
+        self.browse = QtWidgets.QPushButton("Browse")
+        self.browse.setProperty("secondary", True)
+        self.browse.clicked.connect(self._browse)
         file_layout.addWidget(self.output, 1)
-        file_layout.addWidget(browse)
-        grid.addWidget(file_row, 4, 0, 1, 2)
+        file_layout.addWidget(self.browse)
+        grid.addWidget(file_row, 5, 0, 1, 2)
 
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
@@ -685,7 +725,20 @@ class CellControls:
         progress_layout.setSpacing(12)
         progress_layout.addWidget(self.progress)
         progress_layout.addWidget(self.detail, 1)
-        grid.addWidget(progress_row, 5, 0, 1, 2)
+        grid.addWidget(progress_row, 6, 0, 1, 2)
+
+        self._settings = (
+            self.vds,
+            self.vg_initial,
+            self.vg_final,
+            self.vg_step,
+            self.hold,
+            self.keep,
+            self.delay_ms,
+            self.interval,
+            self.output,
+            self.browse,
+        )
 
     @staticmethod
     def _spin(
@@ -720,19 +773,17 @@ class CellControls:
                 selected += ".txt"
             self.output.setText(selected)
 
+    def _active_changed(self, checked: bool) -> None:
+        self.active.setText("ON" if checked else "OFF")
+        for widget in self._settings:
+            widget.setEnabled(checked and self.active.isEnabled())
+        self.progress.setValue(0)
+        self.detail.setText("Ready" if checked else "OFF | held at 0 V | no data file")
+
     def set_enabled(self, enabled: bool) -> None:
-        for widget in (
-            self.vds,
-            self.vg_initial,
-            self.vg_final,
-            self.vg_step,
-            self.hold,
-            self.keep,
-            self.delay_ms,
-            self.interval,
-            self.output,
-        ):
-            widget.setEnabled(enabled)
+        self.active.setEnabled(enabled)
+        for widget in self._settings:
+            widget.setEnabled(enabled and self.active.isChecked())
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -932,6 +983,10 @@ class MainWindow(QtWidgets.QMainWindow):
             QProgressBar { background: #F1ECE3; border: 1px solid #DDD5CA; border-radius: 6px; text-align: center; color: #30435B; min-height: 16px; }
             QProgressBar::chunk { background: #49BAAF; border-radius: 5px; }
             QCheckBox { spacing: 8px; }
+            QCheckBox#cellToggle { color: #526378; font-weight: 800; spacing: 7px; }
+            QCheckBox#cellToggle::indicator { width: 34px; height: 17px; border-radius: 9px; border: 1px solid #B8B0A5; background: #D8D2C8; }
+            QCheckBox#cellToggle::indicator:checked { border-color: #0D9D93; background: #0D9D93; }
+            QCheckBox#cellToggle::indicator:disabled { border-color: #D5CEC4; background: #E7E2DA; }
             """.replace("__ARROW_UP__", arrow_up).replace("__ARROW_DOWN__", arrow_down)
         )
 
@@ -951,9 +1006,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _cell_plan(self, name: str, controls: CellControls) -> CellPlan:
         drain_channel, gate_channel = ((1, 2) if name == "A" else (3, 4))
+        enabled = controls.active.isChecked()
         output_text = controls.output.text().strip()
-        if not output_text:
+        if not output_text and enabled:
             raise ValueError(f"OECT {name}: raw-data filename is required")
+        if not output_text:
+            output_text = controls.default_output_name
         output_path = Path(output_text).expanduser()
         if not output_path.is_absolute():
             output_path = controls.default_output_dir / output_path
@@ -972,6 +1030,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ids_limit_a=DEFAULT_CURRENT_LIMIT_A,
             ig_limit_a=DEFAULT_CURRENT_LIMIT_A,
             output_path=output_path.resolve(),
+            enabled=enabled,
         )
 
     def _build_plan(self) -> ExperimentPlan:
@@ -982,14 +1041,18 @@ class MainWindow(QtWidgets.QMainWindow):
             cell_a=self._cell_plan("A", self.controls_a),
             cell_b=self._cell_plan("B", self.controls_b),
         )
-        _ = plan.cell_a.levels
-        _ = plan.cell_b.levels
+        for cell in plan.active_cells:
+            _ = cell.levels
         _ = plan.hardware_interval_s
-        if plan.cell_a.output_path == plan.cell_b.output_path:
+        if (
+            plan.cell_a.enabled
+            and plan.cell_b.enabled
+            and plan.cell_a.output_path == plan.cell_b.output_path
+        ):
             raise ValueError("OECT A and B must use different output files")
         if not plan.host and not plan.simulation:
             raise ValueError("Instrument IP address is required")
-        for cell in (plan.cell_a, plan.cell_b):
+        for cell in plan.active_cells:
             if cell.hold_s <= 0 or cell.interval_s <= 0:
                 raise ValueError(f"OECT {cell.name}: hold and interval must be positive")
             if cell.delay_s >= cell.hold_s:
@@ -1005,7 +1068,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Invalid settings", str(exc))
             return
 
-        existing = [path for path in (plan.cell_a.output_path, plan.cell_b.output_path) if path.exists()]
+        existing = [cell.output_path for cell in plan.active_cells if cell.output_path.exists()]
         if existing:
             answer = QtWidgets.QMessageBox.question(
                 self,
@@ -1035,8 +1098,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 values.clear()
         for curve in self.curves.values():
             curve.setData([], [])
-        self.controls_a.progress.setValue(0)
-        self.controls_b.progress.setValue(0)
+        for cell, controls in (
+            (plan.cell_a, self.controls_a),
+            (plan.cell_b, self.controls_b),
+        ):
+            controls.progress.setValue(0)
+            controls.detail.setText("Ready" if cell.enabled else "OFF | held at 0 V | no data file")
 
         self.worker = AcquisitionWorker(plan)
         self.worker.sample_ready.connect(self._sample)
@@ -1045,9 +1112,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.completed.connect(self._completed)
         self.worker.finished.connect(self._worker_finished)
         self._set_running(True)
+        durations = " • ".join(
+            f"{cell.name} ≈ {cell.estimated_duration_s:g} s" if cell.enabled else f"{cell.name} OFF"
+            for cell in (plan.cell_a, plan.cell_b)
+        )
         self.status_label.setText(
-            f"Starting • hardware base interval {plan.hardware_interval_s:g} s • "
-            f"A ≈ {plan.cell_a.estimated_duration_s:g} s • B ≈ {plan.cell_b.estimated_duration_s:g} s"
+            f"Starting • hardware base interval {plan.hardware_interval_s:g} s • {durations}"
         )
         self.worker.start()
 

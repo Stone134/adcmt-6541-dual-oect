@@ -55,6 +55,49 @@ class GuiSyntheticTests(unittest.TestCase):
         self.assertEqual(common_hardware_interval(1.0, 2.0), 1.0)
         self.assertEqual(common_hardware_interval(1.5, 2.0), 0.5)
 
+    def test_disabled_cell_is_held_at_zero_and_gets_no_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def cell(name: str, enabled: bool, interval: float) -> CellPlan:
+                return CellPlan(
+                    name=name,
+                    drain_channel=1 if name == "A" else 3,
+                    gate_channel=2 if name == "A" else 4,
+                    vds_v=-0.01,
+                    vg_initial_v=-0.1,
+                    vg_final_v=-0.1,
+                    vg_step_v=-0.1,
+                    hold_s=0.2,
+                    keep_s=0.0,
+                    delay_s=0.0,
+                    interval_s=interval,
+                    ids_limit_a=0.3,
+                    ig_limit_a=0.3,
+                    output_path=root / f"{name}.txt",
+                    enabled=enabled,
+                )
+
+            plan = ExperimentPlan(
+                host="127.0.0.1",
+                port=5025,
+                simulation=True,
+                cell_a=cell("A", False, 1.0),
+                cell_b=cell("B", True, 0.1),
+            )
+            self.assertEqual(plan.hardware_interval_s, 0.1)
+            progress: list[tuple[str, int, str]] = []
+            worker = AcquisitionWorker(plan)
+            worker.progress_ready.connect(
+                lambda name, percent, detail: progress.append((name, percent, detail))
+            )
+            worker.run()
+            self.assertFalse(plan.cell_a.output_path.exists())
+            self.assertTrue(plan.cell_b.output_path.exists())
+            self.assertGreater(len(plan.cell_b.output_path.read_text().splitlines()), 1)
+            self.assertIn(("A", 0, "OFF | held at 0 V | no data file"), progress)
+            self.assertTrue(any(name == "B" and percent == 100 for name, percent, _ in progress))
+
     def test_output_interval_starts_at_first_available_sample(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "synthetic.txt"
@@ -91,7 +134,13 @@ class GuiSyntheticTests(unittest.TestCase):
                 self.events.append(command)
 
         with tempfile.TemporaryDirectory() as directory:
-            def cell(name: str, vds: float, vg: float, interval: float) -> CellPlan:
+            def cell(
+                name: str,
+                vds: float,
+                vg: float,
+                interval: float,
+                enabled: bool = True,
+            ) -> CellPlan:
                 return CellPlan(
                     name=name,
                     drain_channel=1 if name == "A" else 3,
@@ -101,6 +150,7 @@ class GuiSyntheticTests(unittest.TestCase):
                     delay_s=1.0, interval_s=interval,
                     ids_limit_a=0.03, ig_limit_a=0.003,
                     output_path=Path(directory) / f"{name}.txt",
+                    enabled=enabled,
                 )
 
             plan = ExperimentPlan(
@@ -120,6 +170,25 @@ class GuiSyntheticTests(unittest.TestCase):
             self.assertIn("SOV-0.02", events)
             self.assertIn("SOV-0.1", events)
             self.assertIn("SOV-0.3", events)
+
+            fake.events.clear()
+            b_only = ExperimentPlan(
+                host="127.0.0.1", port=5025, simulation=False,
+                cell_a=cell("A", -0.01, -0.1, 1.0, enabled=False),
+                cell_b=cell("B", -0.02, -0.3, 2.0),
+            )
+            driver.configure(b_only)
+            source_by_channel: dict[int, list[str]] = {1: [], 2: [], 3: [], 4: []}
+            selected = 0
+            for event in fake.events:
+                if event.startswith("SCH"):
+                    selected = int(event[3:])
+                elif event.startswith("SOV"):
+                    source_by_channel[selected].append(event)
+            self.assertEqual(source_by_channel[1], ["SOV0"])
+            self.assertEqual(source_by_channel[2], ["SOV0"])
+            self.assertEqual(source_by_channel[3], ["SOV-0.02"])
+            self.assertEqual(source_by_channel[4], ["SOV-0.3"])
 
     def test_completed_cell_sets_both_sources_to_zero_without_stopping_master(self) -> None:
         class FakeInstrument:
@@ -268,6 +337,24 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertEqual(cell.ids_limit_a, 0.3)
             self.assertEqual(cell.ig_limit_a, 0.3)
         self.assertFalse(hasattr(self.window.controls_a, "ids_limit"))
+
+    def test_each_oect_has_an_independent_on_off_switch(self) -> None:
+        self.window.controls_a.active.setChecked(False)
+        self.window.controls_a.output.clear()
+        self.window.controls_b.interval.setValue(2.0)
+        plan = self.window._build_plan()
+        self.assertFalse(plan.cell_a.enabled)
+        self.assertTrue(plan.cell_b.enabled)
+        self.assertEqual(plan.hardware_interval_s, 2.0)
+        self.assertFalse(self.window.controls_a.vds.isEnabled())
+        self.assertFalse(self.window.controls_a.output.isEnabled())
+        self.assertEqual(
+            self.window.controls_a.detail.text(),
+            "OFF | held at 0 V | no data file",
+        )
+        self.window.controls_b.active.setChecked(False)
+        with self.assertRaisesRegex(ValueError, "Enable at least one OECT"):
+            self.window._build_plan()
 
     def test_spinbox_arrows_are_dark_and_renderable(self) -> None:
         style = self.window.styleSheet()
