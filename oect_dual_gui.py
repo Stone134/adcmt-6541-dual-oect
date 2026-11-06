@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -67,21 +68,39 @@ class CellPlan:
     vg_final_v: float
     vg_step_v: float
     hold_s: float
-    keep_s: float
     delay_s: float
     interval_s: float
     ids_limit_a: float
     ig_limit_a: float
     output_path: Path
     enabled: bool = True
+    cycles: int = 1
+    mode: str = "sweep_cycles"
+    keep_s: float = 0.0
 
-    @property
+    @cached_property
     def levels(self) -> tuple[float, ...]:
-        return voltage_levels(self.vg_initial_v, self.vg_final_v, self.vg_step_v)
+        if self.mode not in ("rise_keep", "sweep_cycles"):
+            raise ValueError("Unknown sweep mode")
+        if self.mode == "rise_keep":
+            if not math.isfinite(self.keep_s) or self.keep_s < 0:
+                raise ValueError("Keep at final must be nonnegative and finite")
+            return voltage_levels(self.vg_initial_v, self.vg_final_v, self.vg_step_v)
+        if isinstance(self.cycles, bool) or not isinstance(self.cycles, int) or self.cycles < 1:
+            raise ValueError("Cycles must be a positive integer")
+        forward = voltage_levels(self.vg_initial_v, self.vg_final_v, self.vg_step_v)
+        # Share turning points and the initial voltage between successive cycles.
+        round_trip = forward[1:] + forward[-2::-1] if len(forward) > 1 else ()
+        return forward[:1] + round_trip * self.cycles
 
     @property
     def estimated_duration_s(self) -> float:
-        return len(self.levels) * self.hold_s + self.keep_s
+        return len(self.levels) * self.hold_s + self.final_keep_s
+
+
+    @property
+    def final_keep_s(self) -> float:
+        return self.keep_s if self.mode == "rise_keep" else 0.0
 
 
 @dataclass(frozen=True)
@@ -160,10 +179,9 @@ class CellRuntime:
         self.stage_started_elapsed_s = elapsed_s
         self.measure_started_elapsed_s = elapsed_s + self.plan.delay_s
         # The pre-measurement delay is inside the period/hold, not extra time.
-        duration = self.plan.hold_s
+        self.stage_ends_elapsed_s = elapsed_s + self.plan.hold_s
         if self.is_final_level:
-            duration += self.plan.keep_s
-        self.stage_ends_elapsed_s = elapsed_s + duration
+            self.stage_ends_elapsed_s += self.plan.final_keep_s
         self.next_output_elapsed_s = self.measure_started_elapsed_s
 
     def advance(self, elapsed_s: float) -> bool:
@@ -679,14 +697,28 @@ class CellControls:
         self.vg_final = self._spin(-3.0, 3.0, -0.8, 0.1, 4, " V")
         self.vg_step = self._spin(-3.0, 3.0, -0.1, 0.1, 4, " V")
         self.hold = self._spin(0.1, 1_000_000.0, 60.0, 10.0, 3, " s")
-        self.keep = self._spin(0.0, 1_000_000.0, 3600.0, 60.0, 3, " s")
+        self.cycles = QtWidgets.QSpinBox()
+        self.cycles.setRange(1, 1_000_000)
+        self.cycles.setValue(1)
+        self.cycles.setKeyboardTracking(False)
+        self.cycles.setToolTip("One cycle sweeps initial → final → initial; no extra hold after the sweep")
         self.delay_ms = self._spin(0.0, 59_998.0, 1000.0, 100.0, 1, " ms")
         self.interval = self._spin(0.1, 60.0, 1.0, 0.1, 3, " s")
+
+        self.keep = self._spin(0.0, 1_000_000.0, 3600.0, 60.0, 3, " s")
+        self.mode = QtWidgets.QComboBox()
+        self.mode.addItem("Rise and keep", "rise_keep")
+        self.mode.addItem("Sweep in cycles", "sweep_cycles")
+        self.mode.setCurrentIndex(1)
+        self.mode.setToolTip("Choose a one-way sweep with a final hold, or repeated round trips")
+        self.mode_value = QtWidgets.QStackedWidget()
+        self.mode_value.addWidget(self.keep)
+        self.mode_value.addWidget(self.cycles)
 
         rows = (
             (("Vds", self.vds), ("Period", self.hold)),
             (("Vg initial", self.vg_initial), ("Delay", self.delay_ms)),
-            (("Vg final", self.vg_final), ("Keep at final", self.keep)),
+            (("Vg final", self.vg_final), ("Cycles", self.mode_value)),
             (("Vg step", self.vg_step), ("Read interval", self.interval)),
         )
         for row, pairs in enumerate(rows):
@@ -696,6 +728,8 @@ class CellControls:
                 field_layout.setContentsMargins(0, 0, 0, 0)
                 field_layout.setSpacing(8)
                 caption = QtWidgets.QLabel(label)
+                if widget is self.mode_value:
+                    self.mode_caption = caption
                 caption.setMinimumWidth(80)
                 widget.setMinimumWidth(90)
                 field_layout.addWidget(caption)
@@ -716,7 +750,13 @@ class CellControls:
         self.browse.clicked.connect(self._browse)
         file_layout.addWidget(self.output, 1)
         file_layout.addWidget(self.browse)
-        grid.addWidget(file_row, 5, 0, 1, 2)
+        mode_row = QtWidgets.QWidget()
+        mode_layout = QtWidgets.QHBoxLayout(mode_row)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.addWidget(QtWidgets.QLabel("Program"))
+        mode_layout.addWidget(self.mode, 1)
+        grid.addWidget(mode_row, 5, 0, 1, 2)
+        grid.addWidget(file_row, 6, 0, 1, 2)
 
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
@@ -731,7 +771,7 @@ class CellControls:
         progress_layout.setSpacing(12)
         progress_layout.addWidget(self.progress)
         progress_layout.addWidget(self.detail, 1)
-        grid.addWidget(progress_row, 6, 0, 1, 2)
+        grid.addWidget(progress_row, 7, 0, 1, 2)
 
         self._settings = (
             self.vds,
@@ -739,12 +779,22 @@ class CellControls:
             self.vg_final,
             self.vg_step,
             self.hold,
+            self.cycles,
             self.keep,
+            self.mode,
             self.delay_ms,
             self.interval,
             self.output,
             self.browse,
         )
+
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self._mode_changed()
+
+    def _mode_changed(self, *_args: object) -> None:
+        rise_keep = self.mode.currentData() == "rise_keep"
+        self.mode_value.setCurrentWidget(self.keep if rise_keep else self.cycles)
+        self.mode_caption.setText("Keep at final" if rise_keep else "Cycles")
 
     @staticmethod
     def _spin(
@@ -1030,6 +1080,8 @@ class MainWindow(QtWidgets.QMainWindow):
             vg_final_v=controls.vg_final.value(),
             vg_step_v=controls.vg_step.value(),
             hold_s=controls.hold.value(),
+            cycles=controls.cycles.value(),
+            mode=controls.mode.currentData(),
             keep_s=controls.keep.value(),
             delay_s=controls.delay_ms.value() / 1000.0,
             interval_s=controls.interval.value(),

@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from dataclasses import replace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -51,6 +52,69 @@ class GuiSyntheticTests(unittest.TestCase):
         self.assertEqual(voltage_levels(0.0, -0.8, -0.1), tuple(-0.1 * i for i in range(9)))
         self.assertEqual(voltage_levels(0.0, -0.25, -0.1), (0.0, -0.1, -0.2, -0.25))
 
+    def test_cycles_retrace_endpoints_and_have_no_extra_hold(self) -> None:
+        base = CellPlan(
+            name="A", drain_channel=1, gate_channel=2, vds_v=-0.01,
+            vg_initial_v=0.0, vg_final_v=-0.3, vg_step_v=-0.1,
+            hold_s=0.2, delay_s=0.0, interval_s=0.1,
+            ids_limit_a=0.3, ig_limit_a=0.3, output_path=Path("unused.txt"),
+            cycles=2,
+        )
+        expected = (0, -0.1, -0.2, -0.3, -0.2, -0.1, 0,
+                    -0.1, -0.2, -0.3, -0.2, -0.1, 0)
+        self.assertEqual(len(base.levels), len(expected))
+        for actual, wanted in zip(base.levels, expected):
+            self.assertAlmostEqual(actual, wanted)
+        self.assertAlmostEqual(base.estimated_duration_s, 2.6)
+        state = CellRuntime(base, None)
+        state.start_stage(0.0)
+        for index, wanted in enumerate(expected):
+            self.assertFalse(state.done)
+            self.assertAlmostEqual(state.gate_v, wanted)
+            self.assertAlmostEqual(state.stage_ends_elapsed_s, (index + 1) * 0.2)
+            state.advance(state.stage_ends_elapsed_s)
+        self.assertTrue(state.done)
+        self.assertEqual(replace(base, vg_final_v=0).levels, (0.0,))
+        self.assertEqual(
+            replace(base, vg_final_v=0.25, vg_step_v=0.1, cycles=1).levels,
+            (0, 0.1, 0.2, 0.25, 0.2, 0.1, 0),
+        )
+        for cycles in (0, -1, 1.5, True):
+            with self.assertRaises(ValueError):
+                _ = replace(base, cycles=cycles).levels
+        with self.assertRaises(ValueError):
+            _ = replace(base, vg_step_v=0).levels
+        with self.assertRaises(ValueError):
+            _ = replace(base, vg_step_v=0.1).levels
+
+    def test_rise_and_keep_extends_only_the_final_level(self) -> None:
+        plan = CellPlan(
+            name="A", drain_channel=1, gate_channel=2, vds_v=-0.01,
+            vg_initial_v=0, vg_final_v=-0.3, vg_step_v=-0.1,
+            hold_s=2, delay_s=0.5, interval_s=0.1,
+            ids_limit_a=0.3, ig_limit_a=0.3, output_path=Path("unused.txt"),
+            mode="rise_keep", keep_s=10, cycles=2,
+        )
+        self.assertEqual(len(plan.levels), 4)
+        self.assertEqual(plan.levels[-1], -0.3)
+        self.assertEqual(plan.estimated_duration_s, 18)
+        state = CellRuntime(plan, None)
+        state.start_stage(0)
+        for boundary in (2, 4, 6):
+            self.assertEqual(state.stage_ends_elapsed_s, boundary)
+            state.advance(boundary)
+        self.assertEqual(state.stage_ends_elapsed_s, 18)
+        self.assertTrue(state.should_record(17))
+        state.advance(18)
+        self.assertTrue(state.done)
+        cycles = replace(plan, mode="sweep_cycles")
+        self.assertEqual(cycles.final_keep_s, 0)
+        self.assertEqual(cycles.estimated_duration_s, 26)
+        with self.assertRaises(ValueError):
+            _ = replace(plan, keep_s=-1).levels
+        with self.assertRaises(ValueError):
+            _ = replace(plan, mode="unknown").levels
+
     def test_independent_intervals_share_hardware_clock(self) -> None:
         self.assertEqual(common_hardware_interval(1.0, 2.0), 1.0)
         self.assertEqual(common_hardware_interval(1.5, 2.0), 0.5)
@@ -69,7 +133,7 @@ class GuiSyntheticTests(unittest.TestCase):
                     vg_final_v=-0.1,
                     vg_step_v=-0.1,
                     hold_s=0.2,
-                    keep_s=0.0,
+                    cycles=1,
                     delay_s=0.0,
                     interval_s=interval,
                     ids_limit_a=0.3,
@@ -104,7 +168,7 @@ class GuiSyntheticTests(unittest.TestCase):
             plan = CellPlan(
                 name="A", drain_channel=1, gate_channel=2, vds_v=-0.01,
                 vg_initial_v=-0.1, vg_final_v=-0.1, vg_step_v=-0.1,
-                hold_s=1.0, keep_s=0.0, delay_s=0.0, interval_s=0.2,
+                hold_s=1.0, cycles=1, delay_s=0.0, interval_s=0.2,
                 ids_limit_a=0.03, ig_limit_a=0.003, output_path=path,
             )
             writer = LegacyTextWriter(path)
@@ -150,7 +214,7 @@ class GuiSyntheticTests(unittest.TestCase):
                     drain_channel=1 if name == "A" else 3,
                     gate_channel=2 if name == "A" else 4,
                     vds_v=vds, vg_initial_v=vg, vg_final_v=vg - 0.1,
-                    vg_step_v=-0.1, hold_s=60.0, keep_s=0.0,
+                    vg_step_v=-0.1, hold_s=60.0, cycles=1,
                     delay_s=1.0, interval_s=interval,
                     ids_limit_a=0.03, ig_limit_a=0.003,
                     output_path=Path(directory) / f"{name}.txt",
@@ -245,7 +309,7 @@ class GuiSyntheticTests(unittest.TestCase):
                     vg_final_v=-0.1,
                     vg_step_v=-0.1,
                     hold_s=duration,
-                    keep_s=0.0,
+                    cycles=1,
                     delay_s=0.0,
                     interval_s=0.1,
                     ids_limit_a=0.3,
@@ -336,7 +400,7 @@ class GuiLayoutTests(unittest.TestCase):
 
     def test_compact_controls_and_fixed_current_limits(self) -> None:
         self.assertEqual(self.window.controls_a.vg_final.text(), "-0.8 V")
-        self.assertEqual(self.window.controls_a.keep.text(), "3600 s")
+        self.assertEqual(self.window.controls_a.cycles.text(), "1")
         self.assertEqual(self.window.controls_b.delay_ms.text(), "1000 ms")
         plan = self.window._build_plan()
         self.assertEqual(plan.cell_a.output_path, Path(__file__).resolve().parent.parent / "measurement=lvl1.txt")
@@ -388,11 +452,44 @@ class GuiLayoutTests(unittest.TestCase):
         self.assertGreater(plot.height(), 200)
         self.assertLess(plot.width() / plot.height(), 1.8)
 
+    def test_modes_are_independent_and_preserve_settings(self) -> None:
+        a, b = self.window.controls_a, self.window.controls_b
+        a.mode.setCurrentIndex(a.mode.findData("rise_keep"))
+        a.keep.setValue(123)
+        b.cycles.setValue(2)
+        plan = self.window._build_plan()
+        self.assertEqual(plan.cell_a.mode, "rise_keep")
+        self.assertEqual(plan.cell_a.final_keep_s, 123)
+        self.assertEqual(len(plan.cell_a.levels), 9)
+        self.assertEqual(plan.cell_b.mode, "sweep_cycles")
+        self.assertEqual(plan.cell_b.final_keep_s, 0)
+        self.assertTrue(a.keep.isVisible())
+        self.assertFalse(a.cycles.isVisible())
+        a.mode.setCurrentIndex(a.mode.findData("sweep_cycles"))
+        self.assertTrue(a.cycles.isVisible())
+        self.assertFalse(a.keep.isVisible())
+        a.mode.setCurrentIndex(a.mode.findData("rise_keep"))
+        self.assertEqual(a.keep.value(), 123)
+        self.window._set_running(True)
+        self.assertFalse(a.mode.isEnabled())
+        self.assertFalse(a.keep.isEnabled())
+        self.window._set_running(False)
+        self.assertTrue(a.mode.isEnabled())
+
+    def test_independent_cycle_controls_reach_plan(self) -> None:
+        self.window.controls_a.cycles.setValue(2)
+        self.window.controls_b.cycles.setValue(3)
+        plan = self.window._build_plan()
+        self.assertEqual(plan.cell_a.cycles, 2)
+        self.assertEqual(plan.cell_b.cycles, 3)
+        self.assertEqual(len(plan.cell_a.levels), 33)
+        self.assertEqual(len(plan.cell_b.levels), 49)
+
     def test_control_columns_follow_requested_order(self) -> None:
         for controls in (self.window.controls_a, self.window.controls_b):
             group = controls.group
             left = (controls.vds, controls.vg_initial, controls.vg_final, controls.vg_step)
-            right = (controls.hold, controls.delay_ms, controls.keep, controls.interval)
+            right = (controls.hold, controls.delay_ms, controls.cycles, controls.interval)
             left_positions = [widget.mapTo(group, widget.rect().topLeft()) for widget in left]
             right_positions = [widget.mapTo(group, widget.rect().topLeft()) for widget in right]
             self.assertEqual(len({point.x() for point in left_positions}), 1)
